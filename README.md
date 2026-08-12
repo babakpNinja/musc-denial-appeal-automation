@@ -96,7 +96,9 @@ so lifecycle writes go to a separate `appeal_status.db`:
 
 Railway's filesystem is ephemeral, so without a mounted volume the dashboard shows a **Demo mode**
 banner and `/api/workflow` reports `durable: false` — the workflow is deliberately explicit about
-this rather than silently losing status.
+this rather than silently losing status. The production service has a volume mounted at `/data`
+(`volumeCreate` via `tools/railway.py`'s GraphQL helper), so live status **is** durable:
+`GET /api/workflow` returns `durable: true`.
 
 ## Responsive UI
 
