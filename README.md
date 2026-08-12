@@ -15,7 +15,7 @@ every case, dollar figure and payer appeal portal behind one dashboard.
 |---|---|
 | **Ingest** | 50 synthetic patients pulled as full FHIR R4 bundles → `data/raw/*.json` |
 | **Model** | Normalized SQLite: patients, conditions, encounters, procedures, observations, medications, coverage, payers, claims, denials, appeals |
-| **Denials** | 90 denials across 12 payers with real X12 CARC/RARC code sets, payer remarks, appeal deadlines and denied amounts |
+| **Denials** | 67 denials across 12 payers with real X12 CARC/RARC code sets, payer remarks, appeal deadlines and denied amounts |
 | **Draft** | One LLM call per case (Claude Sonnet via LiteLLM) grounded *only* in that patient's record — Summary / Clinical Background / Basis for Appeal / Requested Action |
 | **Render** | ReportLab MUSC letterhead PDF: official logo, Charleston address block, claim metadata table, signature block, enclosures |
 | **Serve** | FastAPI dashboard: KPIs, denied-$ per payer, denial reasons, per-case detail, PDF preview + download, bulk ZIP, payer appeal-portal links |
@@ -34,6 +34,7 @@ letters/             one pre-generated PDF per denial
 docs/DATA_TAXONOMY.md  FHIR resources, code systems, denial→argument mapping
 tests/test_system.py   end-to-end checks (DB, every PDF, API, UI)
 tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
+tests/test_plausibility.py  ages, deceased patients, claim timeline, draft cache
 tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
 
@@ -56,6 +57,18 @@ python -m pytest tests -q
 
 `generate_letters.py` caches: it skips cases whose PDF already exists, and every draft is
 persisted to `appeals.sections_json` so a redeploy or a letterhead tweak never re-bills the model.
+`build_db.py` drops the database when it rebuilds, so it exports those drafts to
+`data/letter_drafts.json` first and restores them afterwards — rebuilding is free.
+
+### Who gets billed
+
+The 50 FHIR patients are all kept as clinical records, but only the 35 who could plausibly
+receive a claim today get the revenue-cycle overlay: Synthea's cohort includes patients who
+died decades ago and several over 100, and a 113-year-old with an elective outpatient
+procedure discredits an otherwise credible demo. `build_db.is_billable()` requires the patient
+to be alive and aged 0–95 **on the date of service**; for a deceased patient, `patients.age`
+is age at death rather than age since birth. `tests/test_plausibility.py` enforces this along
+with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, inside coverage).
 
 ## API
 

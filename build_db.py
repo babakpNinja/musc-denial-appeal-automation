@@ -12,6 +12,15 @@ Two layers:
    patient id) and are always grounded in that patient's real conditions,
    procedures and encounter dates. Clearly labelled SYNTHETIC everywhere.
 
+Only patients who are plausible subjects for a *current* claim get the overlay:
+Synthea's cohort includes people who died decades ago and people over 100, and
+billing them a 2026 outpatient procedure undermines the whole demo. See
+``is_billable``.
+
+Rebuilding drops the database, so the cached LLM letter drafts are exported to
+``data/letter_drafts.json`` first and restored afterwards — a rebuild must never
+cost a re-generation. Re-render the PDFs with ``generate_letters.py --rerender``.
+
 Rebuild at any time:  python build_db.py
 """
 
@@ -27,7 +36,13 @@ from pathlib import Path
 HERE = Path(__file__).parent
 RAW = HERE / "data" / "raw"
 DB_PATH = HERE / "data" / "musc_appeals.db"
+DRAFTS_PATH = HERE / "data" / "letter_drafts.json"
 PAYERS = json.loads((HERE / "data" / "payers.json").read_text())
+
+# A claim we are appealing today has to belong to someone who could plausibly
+# have received the service: alive, and inside a believable age band on the
+# service date. Synthea hands us centenarians and patients who died in 1993.
+MAX_CLAIM_AGE = 95
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -35,7 +50,7 @@ PRAGMA journal_mode=WAL;
 CREATE TABLE patients (
   patient_id TEXT PRIMARY KEY,
   mrn TEXT, first_name TEXT, last_name TEXT, full_name TEXT,
-  gender TEXT, birth_date TEXT, age INTEGER,
+  gender TEXT, birth_date TEXT, age INTEGER, deceased_date TEXT,
   address TEXT, city TEXT, state TEXT, postal_code TEXT, phone TEXT,
   marital_status TEXT, language TEXT, race TEXT, ethnicity TEXT
 );
@@ -324,13 +339,30 @@ def _dt(val: str | None) -> str:
     return (val or "")[:10]
 
 
-def _age(birth: str) -> int | None:
+def _age(birth: str, on: date | None = None) -> int | None:
+    """Age on ``on`` (default today); for a deceased patient pass the date of death."""
     try:
         b = datetime.strptime(birth[:10], "%Y-%m-%d").date()
     except Exception:
         return None
-    t = date.today()
+    t = on or date.today()
     return t.year - b.year - ((t.month, t.day) < (b.month, b.day))
+
+
+def is_billable(birth_date: str, deceased_date: str, service_date: str) -> bool:
+    """Can this patient plausibly be the subject of a claim on ``service_date``?
+
+    Excludes deceased patients (Synthea's cohort includes deaths going back to
+    1950) and anyone outside 0-MAX_CLAIM_AGE on the service date.
+    """
+    if deceased_date:
+        return False
+    try:
+        svc = datetime.strptime(service_date[:10], "%Y-%m-%d").date()
+    except Exception:
+        return False
+    age = _age(birth_date, svc)
+    return age is not None and 0 <= age <= MAX_CLAIM_AGE
 
 
 def _ext(patient: dict, url_frag: str) -> str:
@@ -344,11 +376,54 @@ def _ext(patient: dict, url_frag: str) -> str:
     return ""
 
 
+def dump_drafts(db_path: Path = DB_PATH, cache_path: Path = DRAFTS_PATH) -> int:
+    """Export the cached LLM letter drafts so a rebuild can restore them."""
+    if not db_path.exists():
+        return 0
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = [dict(r) for r in con.execute("SELECT * FROM appeals")]
+    except sqlite3.OperationalError:  # pre-schema database
+        return 0
+    finally:
+        con.close()
+    if not rows:
+        return 0
+    cache = {r["denial_id"]: r for r in rows if r.get("sections_json")}
+    merged = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    merged.update(cache)
+    cache_path.write_text(json.dumps(merged, indent=1, sort_keys=True))
+    return len(cache)
+
+
+def restore_drafts(con: sqlite3.Connection, cache_path: Path = DRAFTS_PATH) -> int:
+    """Re-insert cached appeals for denials that still exist after a rebuild."""
+    if not cache_path.exists():
+        return 0
+    cache = json.loads(cache_path.read_text())
+    live = {r[0] for r in con.execute("SELECT denial_id FROM denials")}
+    cols = ("appeal_id", "denial_id", "patient_id", "payer_id", "status", "letter_path",
+            "letter_text", "model", "generated_at", "argument_summary", "sections_json")
+    n = 0
+    for did, row in cache.items():
+        if did not in live:
+            continue
+        con.execute(
+            f"INSERT OR REPLACE INTO appeals ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+            tuple(row.get(c) for c in cols),
+        )
+        n += 1
+    con.commit()
+    return n
+
+
 def load_bundles() -> list[dict]:
     return [json.loads(p.read_text()) for p in sorted(RAW.glob("*.json"))]
 
 
-def build(db_path: Path = DB_PATH) -> dict:
+def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
+    drafted = dump_drafts(db_path, drafts_path)
     if db_path.exists():
         db_path.unlink()
     for suffix in ("-wal", "-shm"):
@@ -368,7 +443,7 @@ def build(db_path: Path = DB_PATH) -> dict:
             ),
         )
 
-    stats = {"patients": 0, "claims": 0, "denials": 0}
+    stats = {"patients": 0, "billable_patients": 0, "claims": 0, "denials": 0, "drafts_cached": drafted}
     weights = [d["weight"] for d in DENIAL_REASONS]
 
     for bundle in load_bundles():
@@ -384,11 +459,16 @@ def build(db_path: Path = DB_PATH) -> dict:
             "",
         )
         mrn = "MUSC" + str(abs(hash(pid)) % 10_000_000).zfill(7)
+        birth = _dt(pat.get("birthDate"))
+        deceased = _dt(pat.get("deceasedDateTime"))
+        # For the deceased, "age" is age at death — age-since-birth would read as
+        # a live 113-year-old patient.
+        age = _age(birth, datetime.strptime(deceased, "%Y-%m-%d").date() if deceased else None)
         con.execute(
-            "INSERT INTO patients VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO patients VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 pid, mrn, first, last, f"{first} {last}".strip(),
-                pat.get("gender", ""), _dt(pat.get("birthDate")), _age(pat.get("birthDate") or ""),
+                pat.get("gender", ""), birth, age, deceased,
                 " ".join(addr.get("line", []) or []), addr.get("city", ""),
                 addr.get("state", ""), addr.get("postalCode", ""), phone,
                 _text(pat.get("maritalStatus")),
@@ -468,6 +548,12 @@ def build(db_path: Path = DB_PATH) -> dict:
             )
 
         # ---- synthetic revenue-cycle overlay -------------------------------
+        # Clinical history is kept for every patient; only plausible claim
+        # subjects get coverage/claims/denials (see is_billable).
+        if not is_billable(birth, deceased, date.today().isoformat()):
+            continue
+        stats["billable_patients"] += 1
+
         payer = PAYERS[rnd.randrange(len(PAYERS))]
         cov_id = f"COV-{mrn[-6:]}"
         member_id = f"{payer['payer_id'].upper()[:3]}{rnd.randrange(10**8, 10**9)}"
@@ -550,6 +636,7 @@ def build(db_path: Path = DB_PATH) -> dict:
             stats["denials"] += 1
 
     con.commit()
+    stats["drafts_restored"] = restore_drafts(con, drafts_path)
     con.close()
     return stats
 
