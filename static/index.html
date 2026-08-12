@@ -33,7 +33,8 @@
   @media(max-width:900px){.grid{grid-template-columns:1fr}}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
   .card h2{margin:0 0 14px;font-size:14px;text-transform:uppercase;letter-spacing:.7px;color:var(--navy)}
-  .bar{display:grid;grid-template-columns:1fr 92px;gap:10px;align-items:center;margin-bottom:9px;font-size:13px}
+  .bar{display:grid;grid-template-columns:minmax(0,1fr) 92px;gap:10px;align-items:center;margin-bottom:9px;font-size:13px}
+  .bar>div{min-width:0}
   .bar .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .bar .track{height:7px;background:#EDF1F4;border-radius:5px;margin-top:4px;overflow:hidden}
   .bar .fill{height:100%;background:linear-gradient(90deg,var(--teal),var(--teal-2));border-radius:5px}
@@ -53,8 +54,22 @@
   .tag.mi{background:#EAF3FF;color:#144E8C} .tag.tf{background:#F0EAFB;color:#5B3E9E}
   .pill{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;
         background:#E6F4EE;color:var(--ok);text-transform:uppercase;letter-spacing:.4px}
+  .st{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;
+      text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+  .st.ready{background:#EAF2F8;color:var(--navy)}
+  .st.submitted{background:#FFF4E0;color:#8A5A00}
+  .st.overturned{background:#E6F4EE;color:var(--ok)}
+  .st.upheld{background:#FDECEA;color:var(--danger)}
+  .banner{background:#FFF4E0;border:1px solid #F0DCB4;color:#8A5A00;border-radius:10px;
+          padding:10px 14px;font-size:12.5px;margin-bottom:16px}
   .muted{color:var(--muted)}
   .table-wrap{overflow-x:auto}
+  .timeline{list-style:none;margin:0;padding:0;font-size:13px}
+  .timeline li{padding:6px 0 6px 14px;border-left:2px solid var(--line);position:relative}
+  .timeline li:before{content:'';position:absolute;left:-5px;top:12px;width:8px;height:8px;
+                      border-radius:50%;background:var(--teal)}
+  textarea{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:8px;width:100%;
+           resize:vertical;color:var(--text)}
   /* modal */
   .overlay{position:fixed;inset:0;background:rgba(11,44,74,.55);display:none;z-index:50;padding:24px}
   .overlay.on{display:block}
@@ -64,7 +79,8 @@
   .modal .mh h3{margin:0;font-size:17px} .modal .mh .sub{font-size:12.5px;color:#A9C2D8;margin-top:3px}
   .modal .mh button{margin-left:auto;background:transparent;border:1px solid #3d5f80;color:#fff;
         border-radius:8px;padding:6px 12px;cursor:pointer;font:inherit}
-  .mb{padding:18px 20px;overflow:auto}
+  .mb{padding:18px 20px;overflow:auto;min-width:0}   /* min-width:0 so long cells can't widen the modal */
+  .modal>*{min-width:0}
   .cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}
   @media(max-width:860px){.cols{grid-template-columns:1fr}}
   .kv{width:100%;font-size:13px} .kv td{padding:5px 0;border-bottom:1px solid #F0F3F6}
@@ -84,6 +100,48 @@
   footer{text-align:center;color:var(--muted);font-size:12px;padding:26px 16px 40px;line-height:1.7}
   .badge-syn{background:#FFF4E0;color:#8A5A00;border:1px solid #F0DCB4;padding:3px 9px;border-radius:6px;font-size:11.5px}
   .loading{padding:30px;text-align:center;color:var(--muted)}
+
+  /* ---------------------------------------------------------------- tablet */
+  @media(max-width:900px){
+    main{padding:16px 12px 48px}
+    header{padding:12px 14px;gap:10px}
+    header img{height:32px}
+    header .t{font-size:15px} header .s{display:none}
+    header .zip{padding:7px 11px;font-size:12px}
+    .card{padding:14px}
+    embed,iframe.pdf{height:520px}
+    /* tables collapse into cards */
+    table.responsive,table.responsive tbody,table.responsive tr,table.responsive td{display:block;width:100%}
+    table.responsive thead{display:none}
+    table.responsive tr{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;
+                        background:#fff}
+    table.responsive td{border:none;padding:4px 0;display:flex;gap:10px;align-items:baseline;
+                        justify-content:space-between;text-align:right}
+    table.responsive td:before{content:attr(data-label);color:var(--muted);font-size:11px;
+                               text-transform:uppercase;letter-spacing:.6px;text-align:left;flex:0 0 40%}
+    table.responsive td.money{text-align:right}
+    table.responsive td.full{display:block;text-align:left}
+    table.responsive td.full:before{display:block;margin-bottom:3px}
+    .table-wrap{overflow-x:visible}
+  }
+  /* ---------------------------------------------------------------- mobile */
+  @media(max-width:760px){
+    .kpis{grid-template-columns:1fr 1fr;gap:10px}
+    .kpi{padding:12px 13px}
+    .kpi .v{font-size:21px} .kpi .l{font-size:10.5px} .kpi .d{font-size:11px}
+    .filters{gap:8px} .filters select,.filters input{width:100%} input[type=search]{min-width:0}
+    /* full-screen modal */
+    .overlay{padding:0}
+    .modal{max-width:none;height:100vh;max-height:100vh;border-radius:0}
+    .modal .mh{padding:12px 14px} .modal .mh h3{font-size:15px} .modal .mh .sub{font-size:11.5px}
+    .mb{padding:14px}
+    .mb table.kv{table-layout:fixed}
+    .mb td,.mb li,.quote,.sec{overflow-wrap:anywhere}
+    .cols{grid-template-columns:1fr;gap:14px}
+    .btnrow .btn{flex:1 1 100%;text-align:center}
+    embed,iframe.pdf{height:380px}
+    .kv td:first-child{width:44%}
+  }
 </style>
 </head>
 <body>
@@ -98,6 +156,7 @@
 </header>
 
 <main>
+  <div id="wfBanner"></div>
   <div class="kpis" id="kpis"></div>
 
   <div class="grid">
@@ -107,7 +166,7 @@
 
   <div class="card" style="margin-bottom:20px">
     <h2>Payer appeal portals</h2>
-    <div class="table-wrap"><table><thead><tr>
+    <div class="table-wrap"><table class="responsive"><thead><tr>
       <th>Insurance provider</th><th>Type</th><th>Portal</th><th>Denials</th>
       <th style="text-align:right">Denied $</th><th>Appeal window</th><th>Upload / appeal link</th>
     </tr></thead><tbody id="payerRows"></tbody></table></div>
@@ -119,13 +178,14 @@
       <input type="search" id="q" placeholder="Search patient, MRN, claim, CPT, ICD-10, CARC…">
       <select id="payerF"><option value="">All payers</option></select>
       <select id="catF"><option value="">All denial reasons</option></select>
+      <select id="statusF"><option value="">All appeal statuses</option></select>
       <span class="muted" id="count"></span>
     </div>
-    <div class="table-wrap"><table><thead><tr>
+    <div class="table-wrap"><table class="responsive"><thead><tr>
       <th>Patient</th><th>MRN</th><th>Payer</th><th>Service</th><th>CPT</th>
       <th>Denial reason</th><th>CARC</th><th style="text-align:right">Denied</th>
-      <th>Deadline</th><th>Letter</th>
-    </tr></thead><tbody id="caseRows"><tr><td colspan="10" class="loading">Loading…</td></tr></tbody></table></div>
+      <th>Deadline</th><th>Appeal status</th><th>Letter</th>
+    </tr></thead><tbody id="caseRows"><tr><td colspan="11" class="loading">Loading…</td></tr></tbody></table></div>
   </div>
 </main>
 
@@ -150,35 +210,63 @@ const fmtK = n => n>=1000 ? '$'+(n/1000).toFixed(1)+'k' : '$'+(n||0).toFixed(0);
 const esc = s => (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const catClass = c => ({'Medical necessity':'mn','Prior authorization':'pa','Missing information':'mi',
                         'Timely filing':'tf'}[c]||'');
-let CASES = [], STATS = null;
+const STATUS_LABEL = {ready:'Ready to submit', submitted:'Submitted', overturned:'Overturned (paid)', upheld:'Upheld (denied)'};
+let CASES = [], STATS = null, WF = null;
 
 async function boot(){
-  STATS = await (await fetch('/api/stats')).json();
-  const t = STATS.totals;
-  $('#kpis').innerHTML = [
-    ['Patients', t.patients, 'synthetic FHIR records'],
-    ['Denied claims', t.denials, 'across ' + STATS.by_payer.length + ' payers'],
-    ['Revenue at risk', fmt(t.denied_total), 'total denied charges'],
-    ['Average denial', fmt(t.denied_avg), 'per claim'],
-    ['Appeal letters ready', t.denials, 'pre-generated PDFs'],
-  ].map(([l,v,d])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+  [STATS, WF] = await Promise.all([
+    (await fetch('/api/stats')).json(),
+    (await fetch('/api/workflow')).json(),
+  ]);
+  if (!WF.durable)
+    $('#wfBanner').innerHTML = `<div class="banner"><strong>Demo mode:</strong>
+      ${esc(WF.note.replace(/^Demo mode:\s*/,''))}
+      Attach a Railway volume (<code>RAILWAY_VOLUME_MOUNT_PATH</code>) to make it durable.</div>`;
+  renderKpis();
 
   bars('#byPayer', STATS.by_payer.map(r=>({name:r.payer, val:r.denied_amount, sub:r.denials+' denials'})));
   bars('#byReason', STATS.by_reason.map(r=>({name:r.category, val:r.denied_amount, sub:r.denials+' denials'})));
 
   const payers = await (await fetch('/api/payers')).json();
   $('#payerRows').innerHTML = payers.filter(p=>p.denials>0).map(p=>`<tr onclick="event.stopPropagation()">
-      <td><strong>${esc(p.name)}</strong></td><td class="muted">${esc(p.type)}</td>
-      <td>${esc(p.portal_name||'—')}</td><td>${p.denials}</td>
-      <td class="money">${fmt(p.denied_amount)}</td>
-      <td class="muted">${p.appeal_window_days? p.appeal_window_days+' days':'—'}</td>
-      <td><a href="${esc(p.appeal_url||p.portal_url)}" target="_blank" rel="noopener">Open appeals portal ↗</a></td>
+      <td class="full"><strong>${esc(p.name)}</strong></td>
+      <td class="muted" data-label="Type">${esc(p.type)}</td>
+      <td data-label="Portal">${esc(p.portal_name||'—')}</td>
+      <td data-label="Denials">${p.denials}</td>
+      <td class="money" data-label="Denied $">${fmt(p.denied_amount)}</td>
+      <td class="muted" data-label="Appeal window">${p.appeal_window_days? p.appeal_window_days+' days':'—'}</td>
+      <td data-label="Appeal"><a href="${esc(p.appeal_url||p.portal_url)}" target="_blank" rel="noopener">Open appeals portal ↗</a></td>
     </tr>`).join('');
   $('#payerF').innerHTML += payers.filter(p=>p.denials>0)
       .map(p=>`<option value="${p.payer_id}">${esc(p.name)} (${p.denials})</option>`).join('');
   $('#catF').innerHTML += STATS.by_reason.map(r=>`<option value="${esc(r.category)}">${esc(r.category)} (${r.denials})</option>`).join('');
+  renderStatusFilter();
 
   await loadCases();
+}
+
+function renderKpis(){
+  const t = STATS.totals, w = STATS.workflow;
+  $('#kpis').innerHTML = [
+    ['Patients', t.patients, 'synthetic FHIR records'],
+    ['Denied claims', t.denials, 'across ' + STATS.by_payer.length + ' payers'],
+    ['Revenue at risk', fmt(t.denied_total), 'total denied charges'],
+    ['Average denial', fmt(t.denied_avg), 'per claim'],
+    ['Appeal letters ready', t.denials, 'pre-generated PDFs'],
+    ['Submitted / outstanding', `${w.submitted.denials} / ${w.outstanding}`,
+     `${fmt(w.submitted.denied_amount)} in flight · ${w.overturned.denials} overturned, ${w.upheld.denials} upheld`],
+  ].map(([l,v,d])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+}
+
+function renderStatusFilter(){
+  const w = STATS.workflow, cur = $('#statusF').value;
+  $('#statusF').innerHTML = '<option value="">All appeal statuses</option>' +
+    WF.statuses.map(s=>`<option value="${s}"${s===cur?' selected':''}>${STATUS_LABEL[s]} (${w[s].denials})</option>`).join('');
+}
+
+async function refreshStats(){
+  STATS = await (await fetch('/api/stats')).json();
+  renderKpis(); renderStatusFilter();
 }
 
 function bars(sel, rows){
@@ -190,22 +278,24 @@ function bars(sel, rows){
 }
 
 async function loadCases(){
-  const p = new URLSearchParams({payer:$('#payerF').value, category:$('#catF').value, search:$('#q').value});
+  const p = new URLSearchParams({payer:$('#payerF').value, category:$('#catF').value,
+                                search:$('#q').value, status:$('#statusF').value});
   CASES = await (await fetch('/api/cases?'+p)).json();
   $('#count').textContent = CASES.length + ' case' + (CASES.length===1?'':'s');
   $('#caseRows').innerHTML = CASES.length ? CASES.map(c=>`<tr onclick="openCase('${c.denial_id}')">
-      <td><strong>${esc(c.full_name)}</strong><div class="muted">${c.age}y ${esc(c.gender||'')}</div></td>
-      <td class="muted">${esc(c.mrn)}</td>
-      <td>${esc(c.payer_name)}</td>
-      <td class="muted">${esc(c.service_date)}</td>
-      <td>${esc(c.cpt_code)}<div class="muted" style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.cpt_description)}</div></td>
-      <td><span class="tag ${catClass(c.category)}">${esc(c.category)}</span></td>
-      <td class="muted">${esc(c.carc_code)}</td>
-      <td class="money">${fmt(c.denied_amount)}</td>
-      <td class="muted">${esc(c.appeal_deadline)}</td>
-      <td>${c.letter_path?`<a href="/letters/${c.denial_id}.pdf?download=1" onclick="event.stopPropagation()">PDF ⬇</a>`
+      <td class="full"><strong>${esc(c.full_name)}</strong><span class="muted"> · ${c.age}y ${esc(c.gender||'')}</span></td>
+      <td class="muted" data-label="MRN">${esc(c.mrn)}</td>
+      <td data-label="Payer">${esc(c.payer_name)}</td>
+      <td class="muted" data-label="Service">${esc(c.service_date)}</td>
+      <td data-label="CPT">${esc(c.cpt_code)}<div class="muted" style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.cpt_description)}</div></td>
+      <td data-label="Reason"><span class="tag ${catClass(c.category)}">${esc(c.category)}</span></td>
+      <td class="muted" data-label="CARC">${esc(c.carc_code)}</td>
+      <td class="money" data-label="Denied">${fmt(c.denied_amount)}</td>
+      <td class="muted" data-label="Deadline">${esc(c.appeal_deadline)}</td>
+      <td data-label="Status"><span class="st ${esc(c.appeal_status)}">${esc(c.appeal_status)}</span></td>
+      <td data-label="Letter">${c.letter_path?`<a href="/letters/${c.denial_id}.pdf?download=1" onclick="event.stopPropagation()">PDF ⬇</a>`
                          :'<span class="muted">pending</span>'}</td>
-    </tr>`).join('') : '<tr><td colspan="10" class="loading">No cases match those filters.</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="11" class="loading">No cases match those filters.</td></tr>';
 }
 
 async function openCase(id){
@@ -221,9 +311,10 @@ async function openCase(id){
       <a class="btn" href="/letters/${c.denial_id}.pdf?download=1">⬇ Download appeal letter (PDF)</a>
       <a class="btn alt" href="${esc(c.appeal_url||c.portal_url)}" target="_blank" rel="noopener">↗ Upload to ${esc(c.portal_name||c.payer_name)}</a>
       <button class="btn alt" onclick="regen('${c.denial_id}',this)">↻ Regenerate letter</button>
-      <span class="pill">${esc(c.appeal_status||'pending')}</span>
+      <span class="st ${esc(c.appeal_status)}">${esc(STATUS_LABEL[c.appeal_status]||c.appeal_status)}</span>
       <span class="badge-syn">synthetic data</span>
     </div>
+    <div class="sec" id="wfPanel">${workflowPanel(c)}</div>
     <div class="cols">
       <div>
         <div class="sec"><h4>Denial</h4>
@@ -267,6 +358,36 @@ async function openCase(id){
     </div>`;
 }
 
+function workflowPanel(c){
+  const events = (c.status_events||[]).map(e=>`<li><strong>${esc(STATUS_LABEL[e.to_status]||e.to_status)}</strong>
+      <span class="muted">${esc((e.at||'').replace('T',' ').replace('+00:00',' UTC'))}</span>
+      ${e.note?`<div class="muted">“${esc(e.note)}”</div>`:''}</li>`).join('');
+  const next = (c.next_statuses||[]).map(s=>
+      `<button class="btn ${s==='ready'?'alt':''}" onclick="setStatus('${c.denial_id}','${s}',this)">${esc(STATUS_LABEL[s])}</button>`).join('');
+  return `<h4>Appeal workflow</h4>
+    <table class="kv">
+      <tr><td>Status</td><td><span class="st ${esc(c.appeal_status)}">${esc(STATUS_LABEL[c.appeal_status]||c.appeal_status)}</span></td></tr>
+      <tr><td>Submitted</td><td>${esc((c.submitted_at||'—').replace('T',' ').replace('+00:00',' UTC'))}</td></tr>
+      <tr><td>Outcome</td><td>${esc(c.outcome||'—')}</td></tr>
+    </table>
+    ${next?`<textarea id="wfNote" rows="2" placeholder="Note (e.g. faxed to payer, reference #)" style="margin-top:10px"></textarea>
+            <div class="btnrow">${next}</div>`
+          :'<div class="muted" style="margin-top:10px">Closed — overturned appeals are terminal.</div>'}
+    ${events?`<ul class="timeline">${events}</ul>`:'<div class="muted">No status changes yet.</div>'}
+    ${WF && !WF.durable?'<div class="muted" style="font-size:11.5px;margin-top:8px">Demo mode: status resets on redeploy.</div>':''}`;
+}
+
+async function setStatus(id, status, btn){
+  const note = $('#wfNote') ? $('#wfNote').value : '';
+  btn.disabled = true; const label = btn.textContent; btn.textContent = 'Saving…';
+  const r = await fetch(`/api/cases/${id}/status`, {method:'POST', headers:{'Content-Type':'application/json'},
+                                                   body: JSON.stringify({status, note})});
+  if (!r.ok){ btn.disabled = false; btn.textContent = label; alert((await r.json()).detail || 'Update failed'); return; }
+  const c = await r.json(); c.status_events = c.events;
+  $('#wfPanel').innerHTML = workflowPanel(c);
+  await Promise.all([refreshStats(), loadCases()]);
+}
+
 async function regen(id, btn){
   btn.disabled = true; btn.textContent = '↻ Regenerating…';
   const r = await fetch('/api/cases/'+id+'/regenerate', {method:'POST'});
@@ -280,6 +401,7 @@ document.addEventListener('keydown', e => { if(e.key==='Escape') closeModal(); }
 let t; $('#q').addEventListener('input', ()=>{clearTimeout(t); t=setTimeout(loadCases,250)});
 $('#payerF').addEventListener('change', loadCases);
 $('#catF').addEventListener('change', loadCases);
+$('#statusF').addEventListener('change', loadCases);
 boot();
 </script>
 </body>

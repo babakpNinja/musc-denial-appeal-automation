@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
-*.db-wal
-*.db-shm
+data/musc_appeals.db-wal
+data/musc_appeals.db-shm
+letters/_*.png
+.pytest_cache/
+data/appeal_status.db*

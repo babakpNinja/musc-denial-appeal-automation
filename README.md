@@ -19,6 +19,7 @@ every case, dollar figure and payer appeal portal behind one dashboard.
 | **Draft** | One LLM call per case (Claude Sonnet via LiteLLM) grounded *only* in that patient's record — Summary / Clinical Background / Basis for Appeal / Requested Action |
 | **Render** | ReportLab MUSC letterhead PDF: official logo, Charleston address block, claim metadata table, signature block, enclosures |
 | **Serve** | FastAPI dashboard: KPIs, denied-$ per payer, denial reasons, per-case detail, PDF preview + download, bulk ZIP, payer appeal-portal links |
+| **Track** | Appeal lifecycle `ready → submitted → overturned / upheld` with notes, an event timeline, status chips + filter and a submitted/outstanding KPI |
 
 ## Layout
 
@@ -32,6 +33,8 @@ static/index.html    dashboard UI (no build step, no CDN)
 letters/             one pre-generated PDF per denial
 docs/DATA_TAXONOMY.md  FHIR resources, code systems, denial→argument mapping
 tests/test_system.py   end-to-end checks (DB, every PDF, API, UI)
+tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
+tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
 
 ## Run locally
@@ -66,6 +69,44 @@ persisted to `appeals.sections_json` so a redeploy or a letterhead tweak never r
 | `GET /letters/{denial_id}.pdf?download=1` | one appeal letter |
 | `GET /letters.zip?payer=` | bulk download |
 | `POST /api/cases/{denial_id}/regenerate` | re-draft a single letter |
+| `GET /api/workflow` | statuses, legal transitions, where status is stored and whether it is durable |
+| `GET /api/cases/{denial_id}/status` | current status + event history |
+| `POST /api/cases/{denial_id}/status` | `{"status": "submitted", "note": "faxed, ref 8821"}` — 409 on an illegal transition |
+
+## Appeal lifecycle
+
+```
+ready ──▶ submitted ──▶ overturned   (terminal)
+  ▲           │
+  └───────────┴──▶ upheld ──▶ submitted   (second-level appeal)
+```
+
+`ready → submitted` stamps `submitted_at`; withdrawing back to `ready` clears it; the outcome
+states set `outcome`. Every change is appended to an event log with an optional note and shown
+as a timeline in the case modal.
+
+**Where it is stored.** `musc_appeals.db` is a build artifact (rebuilt from FHIR and committed),
+so lifecycle writes go to a separate `appeal_status.db`:
+
+| Env | Store | Durable? |
+|---|---|---|
+| `RAILWAY_VOLUME_MOUNT_PATH` set | `$RAILWAY_VOLUME_MOUNT_PATH/appeal_status.db` | yes — survives redeploys |
+| otherwise | `data/appeal_status.db` (container disk) | no — resets on redeploy |
+| `APPEAL_STATUS_DB` | explicit path (used by tests) | depends |
+
+Railway's filesystem is ephemeral, so without a mounted volume the dashboard shows a **Demo mode**
+banner and `/api/workflow` reports `durable: false` — the workflow is deliberately explicit about
+this rather than silently losing status.
+
+## Responsive UI
+
+One stylesheet, three breakpoints: ≤900px collapses both tables into stacked cards (labels come
+from `data-label`) and shrinks the header, ≤760px puts KPIs 2-up, makes filters full-width and the
+case modal full-screen. Verified at 390×844 (iPhone) and 820×1180 (iPad):
+
+```bash
+python tests/shots.py http://localhost:8123 _local    # phone / tablet / desktop screenshots
+```
 
 ## Deploy
 
