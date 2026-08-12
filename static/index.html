@@ -62,6 +62,34 @@
   .st.upheld{background:#FDECEA;color:var(--danger)}
   .banner{background:#FFF4E0;border:1px solid #F0DCB4;color:#8A5A00;border-radius:10px;
           padding:10px 14px;font-size:12.5px;margin-bottom:16px}
+  .due{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;
+       background:#EDF1F4;color:var(--muted);white-space:nowrap}
+  .due.warn{background:#FFF4E0;color:#8A5A00}
+  .due.over{background:#FDECEA;color:var(--danger)}
+  th.sortable{cursor:pointer;user-select:none} th.sortable:hover{color:var(--navy)}
+  th .arrow{color:var(--teal)}
+  td.pick,th.pick{width:34px;text-align:center;padding-right:0}
+  input[type=checkbox]{width:16px;height:16px;accent-color:var(--teal);cursor:pointer;margin:0}
+  .bulkbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;background:#EAF2F8;
+           border:1px solid #CBDCEA;border-radius:10px;padding:10px 12px;margin-bottom:12px}
+  .bulkbar .n{font-weight:700;color:var(--navy);white-space:nowrap}
+  .bulkbar input[type=text]{flex:1;min-width:180px}
+  .bulkbar .btn{padding:7px 12px;font-size:13px}
+  .bulkmsg{font-size:12.5px;margin-bottom:12px}
+  .bulkmsg.err{color:var(--danger)}
+  .batch{display:grid;grid-template-columns:minmax(0,1.6fr) repeat(3,minmax(0,1fr)) auto;
+         gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+  .batch:last-child{border-bottom:none}
+  .batch .who{min-width:0}
+  .batch .who strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .batch .k{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
+  .batch .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  .batch .acts .btn{padding:7px 11px;font-size:12.5px}
+  @media(max-width:900px){
+    .batch{grid-template-columns:1fr 1fr;gap:8px}
+    .batch .who{grid-column:1/-1}
+    .batch .acts{grid-column:1/-1;justify-content:flex-start}
+  }
   .muted{color:var(--muted)}
   .table-wrap{overflow-x:auto}
   .timeline{list-style:none;margin:0;padding:0;font-size:13px}
@@ -165,11 +193,8 @@
   </div>
 
   <div class="card" style="margin-bottom:20px">
-    <h2>Payer appeal portals</h2>
-    <div class="table-wrap"><table class="responsive"><thead><tr>
-      <th>Insurance provider</th><th>Type</th><th>Portal</th><th>Denials</th>
-      <th style="text-align:right">Denied $</th><th>Appeal window</th><th>Upload / appeal link</th>
-    </tr></thead><tbody id="payerRows"></tbody></table></div>
+    <h2>Submission batches by payer <span class="muted" id="batchSub" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div id="batchRows"><div class="loading">Loading…</div></div>
   </div>
 
   <div class="card">
@@ -181,11 +206,18 @@
       <select id="statusF"><option value="">All appeal statuses</option></select>
       <span class="muted" id="count"></span>
     </div>
+    <div id="bulkBar"></div>
+    <div class="bulkmsg" id="bulkMsg"></div>
     <div class="table-wrap"><table class="responsive"><thead><tr>
-      <th>Patient</th><th>MRN</th><th>Payer</th><th>Service</th><th>CPT</th>
-      <th>Denial reason</th><th>CARC</th><th style="text-align:right">Denied</th>
-      <th>Deadline</th><th>Appeal status</th><th>Letter</th>
-    </tr></thead><tbody id="caseRows"><tr><td colspan="11" class="loading">Loading…</td></tr></tbody></table></div>
+      <th class="pick"><input type="checkbox" id="pickAll" title="Select all matching" onclick="pickAll(this.checked)"></th>
+      <th class="sortable" onclick="sortBy('full_name')">Patient<span id="s-full_name" class="arrow"></span></th>
+      <th>MRN</th><th>Payer</th>
+      <th class="sortable" onclick="sortBy('service_date')">Service<span id="s-service_date" class="arrow"></span></th>
+      <th>CPT</th><th>Denial reason</th><th>CARC</th>
+      <th class="sortable" style="text-align:right" onclick="sortBy('denied_amount')">Denied<span id="s-denied_amount" class="arrow"></span></th>
+      <th class="sortable" onclick="sortBy('days_to_deadline')">Deadline<span id="s-days_to_deadline" class="arrow"></span></th>
+      <th>Appeal status</th><th>Letter</th>
+    </tr></thead><tbody id="caseRows"><tr><td colspan="12" class="loading">Loading…</td></tr></tbody></table></div>
   </div>
 </main>
 
@@ -211,7 +243,9 @@ const esc = s => (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;
 const catClass = c => ({'Medical necessity':'mn','Prior authorization':'pa','Missing information':'mi',
                         'Timely filing':'tf'}[c]||'');
 const STATUS_LABEL = {ready:'Ready to submit', submitted:'Submitted', overturned:'Overturned (paid)', upheld:'Upheld (denied)'};
-let CASES = [], STATS = null, WF = null;
+const BULK_LABEL = {submitted:'Mark submitted', overturned:'Mark overturned', upheld:'Mark upheld', ready:'Withdraw to ready'};
+let CASES = [], STATS = null, WF = null, BATCHES = null;
+let SEL = new Set(), SORT = {key:'denied_amount', dir:-1};
 
 async function boot(){
   [STATS, WF] = await Promise.all([
@@ -228,15 +262,7 @@ async function boot(){
   bars('#byReason', STATS.by_reason.map(r=>({name:r.category, val:r.denied_amount, sub:r.denials+' denials'})));
 
   const payers = await (await fetch('/api/payers')).json();
-  $('#payerRows').innerHTML = payers.filter(p=>p.denials>0).map(p=>`<tr onclick="event.stopPropagation()">
-      <td class="full"><strong>${esc(p.name)}</strong></td>
-      <td class="muted" data-label="Type">${esc(p.type)}</td>
-      <td data-label="Portal">${esc(p.portal_name||'—')}</td>
-      <td data-label="Denials">${p.denials}</td>
-      <td class="money" data-label="Denied $">${fmt(p.denied_amount)}</td>
-      <td class="muted" data-label="Appeal window">${p.appeal_window_days? p.appeal_window_days+' days':'—'}</td>
-      <td data-label="Appeal"><a href="${esc(p.appeal_url||p.portal_url)}" target="_blank" rel="noopener">Open appeals portal ↗</a></td>
-    </tr>`).join('');
+  await loadBatches();
   $('#payerF').innerHTML += payers.filter(p=>p.denials>0)
       .map(p=>`<option value="${p.payer_id}">${esc(p.name)} (${p.denials})</option>`).join('');
   $('#catF').innerHTML += STATS.by_reason.map(r=>`<option value="${esc(r.category)}">${esc(r.category)} (${r.denials})</option>`).join('');
@@ -277,12 +303,80 @@ function bars(sel, rows){
     </div>`).join('');
 }
 
+/* ------------------------------------------------------------ payer batches */
+async function loadBatches(){
+  BATCHES = await (await fetch('/api/batches')).json();
+  const t = BATCHES.totals;
+  $('#batchSub').textContent = t.payers
+    ? `— ${t.denials} outstanding appeals · ${fmt(t.denied_amount)} · ${t.due_soon} due within ${BATCHES.warn_days} days`
+    : '';
+  $('#batchRows').innerHTML = BATCHES.batches.length ? BATCHES.batches.map(b=>`<div class="batch">
+      <div class="who"><strong>${esc(b.payer_name)}</strong>
+        <span class="muted">${esc(b.payer_type)} · ${esc(b.portal_name||'portal')}</span></div>
+      <div><div class="k">Outstanding</div>${b.denials}
+        <span class="muted">(${b.ready} ready, ${b.submitted} in flight)</span></div>
+      <div><div class="k">Denied $</div><strong>${fmt(b.denied_amount)}</strong></div>
+      <div><div class="k">Next deadline</div>${esc(b.next_deadline||'—')} ${dueChip(b.days_to_deadline)}
+        ${b.overdue?`<span class="due over">${b.overdue} overdue</span>`:''}</div>
+      <div class="acts">
+        <a class="btn alt" href="${esc(b.appeal_url)}" target="_blank" rel="noopener">↗ Portal</a>
+        <a class="btn alt" href="${esc(b.zip_url)}">⬇ ${b.denials} letters</a>
+        ${b.ready?`<button class="btn" onclick="submitBatch('${b.payer_id}',this)">Mark ${b.ready} submitted</button>`:''}
+      </div>
+    </div>`).join('') : '<div class="muted">No outstanding appeals — every case is closed.</div>';
+}
+
+function dueChip(days){
+  if (days === null || days === undefined) return '';
+  const warn = BATCHES ? BATCHES.warn_days : 14;
+  if (days < 0)     return `<span class="due over">${-days}d overdue</span>`;
+  if (days <= warn) return `<span class="due warn">${days}d left</span>`;
+  return `<span class="due">${days}d left</span>`;
+}
+
+async function submitBatch(payerId, btn){
+  const b = BATCHES.batches.find(x=>x.payer_id===payerId);
+  if (!b || !b.ready_ids.length) return;
+  if (!confirm(`Mark ${b.ready_ids.length} ${b.payer_name} appeals as submitted?`)) return;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  await applyBulk(b.ready_ids, 'submitted', `Batch upload to ${b.portal_name||b.payer_name}`);
+}
+
+/* -------------------------------------------------------------- case table */
 async function loadCases(){
   const p = new URLSearchParams({payer:$('#payerF').value, category:$('#catF').value,
                                 search:$('#q').value, status:$('#statusF').value});
   CASES = await (await fetch('/api/cases?'+p)).json();
-  $('#count').textContent = CASES.length + ' case' + (CASES.length===1?'':'s');
-  $('#caseRows').innerHTML = CASES.length ? CASES.map(c=>`<tr onclick="openCase('${c.denial_id}')">
+  const live = new Set(CASES.map(c=>c.denial_id));
+  SEL = new Set([...SEL].filter(id=>live.has(id)));   // keep only what is still on screen
+  renderCases();
+}
+
+function sortBy(key){
+  const DEFAULT_DIR = {denied_amount:-1, service_date:-1, days_to_deadline:1, full_name:1};
+  SORT = SORT.key === key ? {key, dir:-SORT.dir} : {key, dir:DEFAULT_DIR[key]||1};
+  renderCases();
+}
+
+function sortedCases(){
+  const {key, dir} = SORT, far = 1e9;
+  return [...CASES].sort((a,b)=>{
+    let x = a[key], y = b[key];
+    if (key === 'days_to_deadline'){ x = x===null?far:x; y = y===null?far:y; }
+    if (typeof x === 'string') return dir * x.localeCompare(y);
+    return dir * ((x||0) - (y||0));
+  });
+}
+
+function renderCases(){
+  const rows = sortedCases();
+  $('#count').textContent = rows.length + ' case' + (rows.length===1?'':'s');
+  ['full_name','service_date','denied_amount','days_to_deadline'].forEach(k=>{
+    const el = $('#s-'+k); if (el) el.textContent = SORT.key===k ? (SORT.dir>0?' ▲':' ▼') : '';
+  });
+  $('#caseRows').innerHTML = rows.length ? rows.map(c=>`<tr onclick="openCase('${c.denial_id}')">
+      <td class="pick" data-label="Select"><input type="checkbox" ${SEL.has(c.denial_id)?'checked':''}
+          onclick="event.stopPropagation();pick('${c.denial_id}',this.checked)"></td>
       <td class="full"><strong>${esc(c.full_name)}</strong><span class="muted"> · ${c.age}y ${esc(c.gender||'')}</span></td>
       <td class="muted" data-label="MRN">${esc(c.mrn)}</td>
       <td data-label="Payer">${esc(c.payer_name)}</td>
@@ -291,11 +385,65 @@ async function loadCases(){
       <td data-label="Reason"><span class="tag ${catClass(c.category)}">${esc(c.category)}</span></td>
       <td class="muted" data-label="CARC">${esc(c.carc_code)}</td>
       <td class="money" data-label="Denied">${fmt(c.denied_amount)}</td>
-      <td class="muted" data-label="Deadline">${esc(c.appeal_deadline)}</td>
+      <td data-label="Deadline"><span class="muted">${esc(c.appeal_deadline)}</span> ${dueChip(c.days_to_deadline)}</td>
       <td data-label="Status"><span class="st ${esc(c.appeal_status)}">${esc(c.appeal_status)}</span></td>
       <td data-label="Letter">${c.letter_path?`<a href="/letters/${c.denial_id}.pdf?download=1" onclick="event.stopPropagation()">PDF ⬇</a>`
                          :'<span class="muted">pending</span>'}</td>
-    </tr>`).join('') : '<tr><td colspan="11" class="loading">No cases match those filters.</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="12" class="loading">No cases match those filters.</td></tr>';
+  if ($('#pickAll')) $('#pickAll').checked = rows.length>0 && SEL.size===rows.length;
+  renderBulkBar();
+}
+
+/* ------------------------------------------------------------ bulk actions */
+function pick(id, on){ on ? SEL.add(id) : SEL.delete(id); renderCases(); }
+function pickAll(on){ SEL = on ? new Set(CASES.map(c=>c.denial_id)) : new Set(); renderCases(); }
+
+function renderBulkBar(){
+  if (!SEL.size){
+    $('#bulkBar').innerHTML = CASES.length
+      ? `<div class="muted" style="font-size:12.5px;margin-bottom:12px">Tick cases to act on several at once —
+         or <a href="#" onclick="pickAll(true);return false">select all ${CASES.length} matching</a>.</div>` : '';
+    return;
+  }
+  const picked = CASES.filter(c=>SEL.has(c.denial_id));
+  const amount = picked.reduce((s,c)=>s+(c.denied_amount||0),0);
+  const note = $('#bulkNote') ? $('#bulkNote').value : '';   // survives a re-render
+  // BULK_LABEL order, not STATUSES order — "Mark submitted" is the everyday action
+  const targets = Object.keys(BULK_LABEL).filter(s => picked.some(c => (WF.transitions[c.appeal_status]||[]).includes(s)));
+  const buttons = targets.map(s=>{
+    const n = picked.filter(c=>(WF.transitions[c.appeal_status]||[]).includes(s)).length;
+    return `<button class="btn ${s==='ready'?'alt':''}" onclick="bulkTo('${s}',this)">${BULK_LABEL[s]} (${n})</button>`;
+  }).join('');
+  $('#bulkBar').innerHTML = `<div class="bulkbar">
+      <span class="n">${SEL.size} selected · ${fmt(amount)}</span>
+      <input type="text" id="bulkNote" value="${esc(note)}" placeholder="Note applied to every case (e.g. batch upload ref #)">
+      ${buttons || '<span class="muted">Nothing can move from here — those cases are closed.</span>'}
+      <button class="btn alt" onclick="pickAll(false)">Clear</button>
+    </div>`;
+}
+
+function bulkTo(status, btn){
+  const note = $('#bulkNote') ? $('#bulkNote').value : '';
+  btn.disabled = true; btn.textContent = 'Saving…';
+  return applyBulk([...SEL], status, note);
+}
+
+async function applyBulk(ids, status, note){
+  const msg = $('#bulkMsg');
+  msg.className = 'bulkmsg'; msg.textContent = '';
+  const r = await fetch('/api/cases/status/bulk', {method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify({denial_ids: ids, status, note})});
+  if (!r.ok){
+    msg.className = 'bulkmsg err';
+    msg.textContent = (await r.json()).detail || 'Bulk update failed';
+    return renderCases();
+  }
+  const res = await r.json();
+  SEL = new Set(res.results.filter(x=>!x.ok).map(x=>x.denial_id));   // leave the refusals ticked
+  await Promise.all([refreshStats(), loadBatches(), loadCases()]);
+  msg.className = 'bulkmsg' + (res.failed ? ' err' : '');
+  msg.textContent = `${res.updated} case${res.updated===1?'':'s'} → ${STATUS_LABEL[status]}` +
+    (res.failed ? ` · ${res.failed} unchanged: ${res.results.find(x=>!x.ok).error}` : '');
 }
 
 async function openCase(id){
@@ -322,7 +470,7 @@ async function openCase(id){
                 ['CARC',`<strong>${esc(c.carc_code)}</strong> — ${esc(c.carc_description)}`],
                 ['RARC',`${esc(c.rarc_code)} — ${esc(c.rarc_description)}`],
                 ['Denied amount',`<strong>${fmt(c.denied_amount)}</strong>`],
-                ['Appeal deadline',esc(c.appeal_deadline)]])}
+                ['Appeal deadline',`${esc(c.appeal_deadline)} ${dueChip(c.days_to_deadline)}`]])}
           <div class="quote" style="margin-top:10px">“${esc(c.payer_remark)}”</div>
         </div>
         <div class="sec"><h4>Claim</h4>
@@ -385,7 +533,7 @@ async function setStatus(id, status, btn){
   if (!r.ok){ btn.disabled = false; btn.textContent = label; alert((await r.json()).detail || 'Update failed'); return; }
   const c = await r.json(); c.status_events = c.events;
   $('#wfPanel').innerHTML = workflowPanel(c);
-  await Promise.all([refreshStats(), loadCases()]);
+  await Promise.all([refreshStats(), loadBatches(), loadCases()]);
 }
 
 async function regen(id, btn){

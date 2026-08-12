@@ -7,7 +7,7 @@ import io
 import os
 import sqlite3
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -51,6 +51,8 @@ TRANSITIONS = {
     "overturned": (),
 }
 OUTCOMES = {"overturned": "overturned", "upheld": "upheld"}
+OPEN_STATUSES = ("ready", "submitted")   # still costing the health system money
+DEADLINE_WARN_DAYS = 14                  # under this, the UI flags the case
 
 
 def status_db_path() -> Path:
@@ -99,6 +101,17 @@ def apply_status(row: dict, smap: dict[str, dict] | None = None) -> dict:
     row["status_note"] = s.get("note")
     row["status_updated_at"] = s.get("updated_at")
     return row
+
+
+def days_left(deadline: str | None, today: date | None = None) -> int | None:
+    """Calendar days until the payer's appeal deadline; negative once it has passed."""
+    if not deadline:
+        return None
+    try:
+        due = datetime.strptime(str(deadline)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (due - (today or date.today())).days
 
 
 CASE_SQL = """
@@ -180,8 +193,10 @@ def cases(payer: str = "", category: str = "", search: str = "", status: str = "
     sql = CASE_SQL + (" WHERE " + " AND ".join(where) if where else "")
     sql += " ORDER BY d.denied_amount DESC LIMIT ?"
     params.append(limit)
-    smap = status_map()
+    smap, today = status_map(), date.today()
     rows = [apply_status(r, smap) for r in q(sql, tuple(params))]
+    for r in rows:
+        r["days_to_deadline"] = days_left(r["appeal_deadline"], today)
     if status:
         rows = [r for r in rows if r["appeal_status"] == status]
     return rows
@@ -193,6 +208,7 @@ def case_detail(denial_id: str):
     if not row:
         raise HTTPException(404, "case not found")
     apply_status(row)
+    row["days_to_deadline"] = days_left(row["appeal_deadline"])
     row["status_events"] = status_events(denial_id)
     row["next_statuses"] = list(TRANSITIONS[row["appeal_status"]])
     pid = row["patient_id"]
@@ -213,6 +229,60 @@ def payers():
     return q("""SELECT pay.*, COUNT(d.denial_id) denials, ROUND(COALESCE(SUM(d.denied_amount),0),2) denied_amount
                 FROM payers pay LEFT JOIN denials d ON d.payer_id=pay.payer_id
                 GROUP BY pay.payer_id ORDER BY denied_amount DESC""")
+
+
+@app.get("/api/batches")
+def batches():
+    """Outstanding appeals grouped into one submission batch per payer.
+
+    A batch is what actually gets worked: open one payer portal, upload that
+    payer's letters, mark them submitted. Ordered by the soonest deadline in the
+    batch so the portal that is about to time out is at the top.
+    """
+    smap, today = status_map(), date.today()
+    rows = q("""SELECT d.denial_id, d.payer_id, d.denied_amount, d.appeal_deadline,
+                       pay.name payer_name, pay.type payer_type, pay.portal_name,
+                       pay.portal_url, pay.appeal_url, pay.appeal_window_days
+                FROM denials d JOIN payers pay ON pay.payer_id=d.payer_id""")
+    groups: dict[str, dict] = {}
+    for r in rows:
+        status = smap.get(r["denial_id"], {}).get("status", "ready")
+        if status not in OPEN_STATUSES:
+            continue
+        g = groups.setdefault(r["payer_id"], {
+            "payer_id": r["payer_id"], "payer_name": r["payer_name"], "payer_type": r["payer_type"],
+            "portal_name": r["portal_name"], "portal_url": r["portal_url"],
+            "appeal_url": r["appeal_url"] or r["portal_url"],
+            "appeal_window_days": r["appeal_window_days"],
+            "zip_url": f"/letters.zip?payer={r['payer_id']}",
+            "ready": 0, "submitted": 0, "denials": 0, "denied_amount": 0.0,
+            "due_soon": 0, "overdue": 0, "next_deadline": None, "denial_ids": [], "ready_ids": [],
+        })
+        g["denials"] += 1
+        g[status] += 1
+        g["denied_amount"] = round(g["denied_amount"] + (r["denied_amount"] or 0), 2)
+        g["denial_ids"].append(r["denial_id"])
+        if status == "ready":
+            g["ready_ids"].append(r["denial_id"])
+        left = days_left(r["appeal_deadline"], today)
+        if left is not None:
+            if left < 0:
+                g["overdue"] += 1
+            elif left <= DEADLINE_WARN_DAYS:
+                g["due_soon"] += 1
+            if g["next_deadline"] is None or r["appeal_deadline"] < g["next_deadline"]:
+                g["next_deadline"] = r["appeal_deadline"]
+    out = list(groups.values())
+    for g in out:
+        g["days_to_deadline"] = days_left(g["next_deadline"], today)
+    out.sort(key=lambda g: (g["next_deadline"] or "9999-12-31", -g["denied_amount"]))
+    return {"warn_days": DEADLINE_WARN_DAYS, "today": today.isoformat(),
+            "batches": out,
+            "totals": {"payers": len(out),
+                       "denials": sum(g["denials"] for g in out),
+                       "denied_amount": round(sum(g["denied_amount"] for g in out), 2),
+                       "due_soon": sum(g["due_soon"] for g in out),
+                       "overdue": sum(g["overdue"] for g in out)}}
 
 
 @app.get("/letters/{denial_id}.pdf")
@@ -256,6 +326,7 @@ def workflow():
     return {
         "statuses": list(STATUSES),
         "transitions": {k: list(v) for k, v in TRANSITIONS.items()},
+        "warn_days": DEADLINE_WARN_DAYS,
         "durable": is_durable(),
         "store": str(status_db_path()),
         "note": ("Appeal status is stored on a mounted volume and persists across redeploys."
@@ -273,32 +344,80 @@ def get_status(denial_id: str):
     return {**row, "events": status_events(denial_id), "next_statuses": list(TRANSITIONS[row["appeal_status"]])}
 
 
-@app.post("/api/cases/{denial_id}/status")
-def set_status(denial_id: str, payload: dict = Body(...)):
+def transition(con: sqlite3.Connection, denial_id: str, new: str, note: str | None,
+               smap: dict[str, dict]) -> tuple[str, str]:
+    """Move one case to ``new`` on an open connection. Raises HTTPException on refusal.
+
+    Shared by the single-case and bulk endpoints so both enforce the same ladder:
+    unknown case -> 404, unknown status -> 422, illegal transition -> 409.
+    """
     if not one("SELECT 1 FROM denials WHERE denial_id=?", (denial_id,)):
         raise HTTPException(404, "case not found")
-    new = (payload.get("status") or "").strip().lower()
-    note = (payload.get("note") or "").strip()[:500] or None
     if new not in STATUSES:
         raise HTTPException(422, f"status must be one of {', '.join(STATUSES)}")
-    current = apply_status({"denial_id": denial_id})["appeal_status"]
+    current = smap.get(denial_id, {}).get("status", "ready")
     if new not in TRANSITIONS[current]:
         allowed = ", ".join(TRANSITIONS[current]) or "nothing (terminal state)"
         raise HTTPException(409, f"cannot move {current} -> {new}; allowed from {current}: {allowed}")
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    prev = status_map().get(denial_id, {})
+    prev = smap.get(denial_id, {})
     submitted_at = now if new == "submitted" else (None if new == "ready" else prev.get("submitted_at"))
-    outcome = OUTCOMES.get(new)
+    con.execute("INSERT INTO appeal_status(denial_id,status,submitted_at,outcome,note,updated_at)"
+                " VALUES(?,?,?,?,?,?) ON CONFLICT(denial_id) DO UPDATE SET"
+                " status=excluded.status, submitted_at=excluded.submitted_at,"
+                " outcome=excluded.outcome, note=excluded.note, updated_at=excluded.updated_at",
+                (denial_id, new, submitted_at, OUTCOMES.get(new), note, now))
+    con.execute("INSERT INTO appeal_status_events(denial_id,from_status,to_status,note,at)"
+                " VALUES(?,?,?,?,?)", (denial_id, current, new, note, now))
+    smap[denial_id] = {"denial_id": denial_id, "status": new, "submitted_at": submitted_at,
+                       "outcome": OUTCOMES.get(new), "note": note, "updated_at": now}
+    return current, new
+
+
+@app.post("/api/cases/status/bulk")
+def set_status_bulk(payload: dict = Body(...)):
+    """Move many cases at once; a case that cannot move is reported, not fatal.
+
+    Revenue-cycle staff work a payer batch at a time — they mark thirty letters
+    submitted after one portal upload. Partial failure is normal (someone already
+    closed a case), so every id gets its own ok/error instead of the batch aborting.
+    """
+    ids = payload.get("denial_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(422, "denial_ids must be a non-empty list")
+    if len(ids) > 500:
+        raise HTTPException(422, "at most 500 cases per batch")
+    new = (payload.get("status") or "").strip().lower()
+    if new not in STATUSES:
+        raise HTTPException(422, f"status must be one of {', '.join(STATUSES)}")
+    note = (payload.get("note") or "").strip()[:500] or None
+
+    smap, results = status_map(), []
     con = status_con()
     try:
-        con.execute("INSERT INTO appeal_status(denial_id,status,submitted_at,outcome,note,updated_at)"
-                    " VALUES(?,?,?,?,?,?) ON CONFLICT(denial_id) DO UPDATE SET"
-                    " status=excluded.status, submitted_at=excluded.submitted_at,"
-                    " outcome=excluded.outcome, note=excluded.note, updated_at=excluded.updated_at",
-                    (denial_id, new, submitted_at, outcome, note, now))
-        con.execute("INSERT INTO appeal_status_events(denial_id,from_status,to_status,note,at)"
-                    " VALUES(?,?,?,?,?)", (denial_id, current, new, note, now))
+        for denial_id in dict.fromkeys(str(i) for i in ids):   # de-dupe, keep order
+            try:
+                current, _ = transition(con, denial_id, new, note, smap)
+                results.append({"denial_id": denial_id, "ok": True, "from": current, "to": new})
+            except HTTPException as exc:
+                results.append({"denial_id": denial_id, "ok": False, "status": exc.status_code,
+                                "from": smap.get(denial_id, {}).get("status"), "error": exc.detail})
+        con.commit()
+    finally:
+        con.close()
+    updated = [r for r in results if r["ok"]]
+    return {"status": new, "requested": len(results), "updated": len(updated),
+            "failed": len(results) - len(updated), "results": results, "durable": is_durable()}
+
+
+@app.post("/api/cases/{denial_id}/status")
+def set_status(denial_id: str, payload: dict = Body(...)):
+    new = (payload.get("status") or "").strip().lower()
+    note = (payload.get("note") or "").strip()[:500] or None
+    con = status_con()
+    try:
+        transition(con, denial_id, new, note, status_map())
         con.commit()
     finally:
         con.close()

@@ -20,6 +20,7 @@ every case, dollar figure and payer appeal portal behind one dashboard.
 | **Render** | ReportLab MUSC letterhead PDF: official logo, Charleston address block, claim metadata table, signature block, enclosures |
 | **Serve** | FastAPI dashboard: KPIs, denied-$ per payer, denial reasons, per-case detail, PDF preview + download, bulk ZIP, payer appeal-portal links |
 | **Track** | Appeal lifecycle `ready → submitted → overturned / upheld` with notes, an event timeline, status chips + filter and a submitted/outstanding KPI |
+| **Work it** | Per-payer submission batches (soonest deadline first, portal link, payer ZIP), multi-select bulk status changes with a shared note, and a days-to-deadline column that flags anything due inside 14 days |
 
 ## Layout
 
@@ -35,6 +36,7 @@ docs/DATA_TAXONOMY.md  FHIR resources, code systems, denial→argument mapping
 tests/test_system.py   end-to-end checks (DB, every PDF, API, UI)
 tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
 tests/test_plausibility.py  ages, deceased patients, claim timeline, draft cache
+tests/test_batch.py    bulk status changes (incl. partial failure) + payer batches
 tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
 
@@ -79,12 +81,14 @@ with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, ins
 | `GET /api/cases?payer=&category=&search=` | filtered case list |
 | `GET /api/cases/{denial_id}` | full case: denial, claim, coverage, clinical context, letter text |
 | `GET /api/payers` | payers with denial counts, $ and appeal-portal URLs |
+| `GET /api/batches` | outstanding appeals grouped per payer: counts, $, soonest deadline, due-soon/overdue, portal + ZIP links |
 | `GET /letters/{denial_id}.pdf?download=1` | one appeal letter |
 | `GET /letters.zip?payer=` | bulk download |
 | `POST /api/cases/{denial_id}/regenerate` | re-draft a single letter |
 | `GET /api/workflow` | statuses, legal transitions, where status is stored and whether it is durable |
 | `GET /api/cases/{denial_id}/status` | current status + event history |
 | `POST /api/cases/{denial_id}/status` | `{"status": "submitted", "note": "faxed, ref 8821"}` — 409 on an illegal transition |
+| `POST /api/cases/status/bulk` | `{"denial_ids": [...], "status": "submitted", "note": "..."}` — per-case `ok`/`error`, max 500 |
 
 ## Appeal lifecycle
 
@@ -97,6 +101,15 @@ ready ──▶ submitted ──▶ overturned   (terminal)
 `ready → submitted` stamps `submitted_at`; withdrawing back to `ready` clears it; the outcome
 states set `outcome`. Every change is appended to an event log with an optional note and shown
 as a timeline in the case modal.
+
+**Working a batch.** Staff do not appeal one claim at a time — they open one payer portal, upload
+that payer's letters and mark them all submitted. The dashboard mirrors that: *Submission batches
+by payer* lists outstanding appeals grouped by payer, ordered by the soonest deadline in the batch,
+each with the portal link, that payer's letter ZIP and a one-click **Mark N submitted**. In the case
+table, tick any set of rows (or select all matching the current filter) and apply a status with one
+shared note. Bulk moves are validated case by case: a case that cannot legally move is reported and
+left ticked while the rest go through, so a batch never half-fails silently. Every case still gets
+its own event row.
 
 **Where it is stored.** `musc_appeals.db` is a build artifact (rebuilt from FHIR and committed),
 so lifecycle writes go to a separate `appeal_status.db`:
@@ -115,7 +128,7 @@ this rather than silently losing status. The production service has a volume mou
 
 ## Responsive UI
 
-One stylesheet, three breakpoints: ≤900px collapses both tables into stacked cards (labels come
+One stylesheet, three breakpoints: ≤900px stacks the payer batches and collapses the case table into cards (labels come
 from `data-label`) and shrinks the header, ≤760px puts KPIs 2-up, makes filters full-width and the
 case modal full-screen. Verified at 390×844 (iPhone) and 820×1180 (iPad):
 
