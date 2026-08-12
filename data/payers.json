@@ -1,0 +1,123 @@
+[
+  {
+    "payer_id": "bcbssc",
+    "name": "BlueCross BlueShield of South Carolina",
+    "type": "Commercial",
+    "portal_name": "My Insurance Manager",
+    "portal_url": "https://www.southcarolinablues.com/web/public/brands/sc/providers/tools-and-resources/my-insurance-manager",
+    "appeal_url": "https://www.southcarolinablues.com/web/public/brands/sc/providers/claims-and-payments/provider-reconsiderations",
+    "appeal_window_days": 90,
+    "appeal_notes": "Submit provider reconsideration through My Insurance Manager (MIM); attach medical records and the remittance advice."
+  },
+  {
+    "payer_id": "bluechoice",
+    "name": "BlueChoice HealthPlan of South Carolina",
+    "type": "Commercial HMO",
+    "portal_name": "My Insurance Manager",
+    "portal_url": "https://www.bluechoicesc.com/providers/my-insurance-manager",
+    "appeal_url": "https://www.bluechoicesc.com/providers/my-insurance-manager",
+    "appeal_window_days": 90,
+    "appeal_notes": "Reconsiderations filed electronically via MIM; second-level appeal in writing to the Provider Appeals Unit."
+  },
+  {
+    "payer_id": "uhc",
+    "name": "UnitedHealthcare",
+    "type": "Commercial",
+    "portal_name": "UHC Provider Portal (UnitedHealthcare Provider Portal / Optum Pay)",
+    "portal_url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+    "appeal_url": "https://www.uhcprovider.com/en/claims-payments-billing/appeals.html",
+    "appeal_window_days": 365,
+    "appeal_window_unit": "months",
+    "appeal_notes": "Electronic reconsideration/appeal submission is required for most plans; use Claims & Payments > Claim Reconsideration in the provider portal. Standard filing window is 12 months (365 days) from the original remittance date."
+  },
+  {
+    "payer_id": "aetna",
+    "name": "Aetna",
+    "type": "Commercial",
+    "portal_name": "Availity Essentials (Aetna payer space)",
+    "portal_url": "https://www.availity.com/",
+    "appeal_url": "https://www.aetna.com/health-care-professionals/disputes-appeals/disputes-appeals-overview.html",
+    "appeal_window_days": 180,
+    "appeal_notes": "Level 1 reconsideration within 180 days of the remittance; submit via Availity Disputes & Appeals with clinical documentation."
+  },
+  {
+    "payer_id": "cigna",
+    "name": "Cigna Healthcare",
+    "type": "Commercial",
+    "portal_name": "CignaforHCP",
+    "portal_url": "https://cignaforhcp.cigna.com/",
+    "appeal_url": "https://www.cigna.com/health-care-providers/coverage-and-claims/appeals-disputes",
+    "appeal_window_days": 180,
+    "appeal_notes": "Submit appeals through CignaforHCP or Availity; include the appeal request form and supporting medical records."
+  },
+  {
+    "payer_id": "humana",
+    "name": "Humana",
+    "type": "Commercial / Medicare Advantage",
+    "portal_name": "Availity Essentials (Humana payer space)",
+    "portal_url": "https://www.availity.com/",
+    "appeal_url": "https://provider.humana.com/support/claims-resources/claims-payments/reconsiderations-appeals",
+    "appeal_window_days": 60,
+    "appeal_notes": "Medicare Advantage reconsiderations within 60 days of the remittance; commercial disputes within 90 days."
+  },
+  {
+    "payer_id": "medicare_palmetto",
+    "name": "Medicare (Palmetto GBA, JM MAC)",
+    "type": "Medicare FFS",
+    "portal_name": "Palmetto GBA eServices",
+    "portal_url": "https://www.onlineproviderservices.com/ecx_improvev2/",
+    "appeal_url": "https://palmettogba.com/jmb/did/8bzllt0553",
+    "appeal_window_days": 120,
+    "appeal_notes": "First level = redetermination, filed within 120 days of the initial determination (MSN/RA date). eServices supports electronic submission with attachments."
+  },
+  {
+    "payer_id": "scdhhs",
+    "name": "South Carolina Medicaid (Healthy Connections / SCDHHS)",
+    "type": "Medicaid FFS",
+    "portal_name": "SCDHHS Medicaid Web-based Claims Submission Tool",
+    "portal_url": "https://portal.scmedicaid.com/",
+    "appeal_url": "https://www.scdhhs.gov/appeals/file-appeal",
+    "appeal_window_days": 30,
+    "appeal_notes": "Appeal must be filed within 30 days of the notice; the Division of Appeals and Hearings accepts electronic and mailed submissions."
+  },
+  {
+    "payer_id": "absolute_total_care",
+    "name": "Absolute Total Care (Centene)",
+    "type": "Medicaid MCO",
+    "portal_name": "Absolute Total Care Secure Provider Portal",
+    "portal_url": "https://provider.absolutetotalcare.com/",
+    "appeal_url": "https://www.absolutetotalcare.com/providers/resources/claims-appeal-process.html",
+    "appeal_window_days": 90,
+    "appeal_notes": "Claim disputes within 90 days of the EOP; submit through the secure provider portal with supporting documentation."
+  },
+  {
+    "payer_id": "molina_sc",
+    "name": "Molina Healthcare of South Carolina",
+    "type": "Medicaid MCO",
+    "portal_name": "Molina Availity Essentials Provider Portal",
+    "portal_url": "https://provider.molinahealthcare.com/",
+    "appeal_url": "https://www.molinahealthcare.com/providers/sc/medicaid/claims/claims_appeals.aspx",
+    "appeal_window_days": 90,
+    "appeal_notes": "Provider claim appeal/dispute form submitted via the provider portal within 90 days of the remittance advice."
+  },
+  {
+    "payer_id": "tricare_east",
+    "name": "TRICARE East (Humana Military)",
+    "type": "Government",
+    "portal_name": "Humana Military Provider Self-Service",
+    "portal_url": "https://www.humanamilitary.com/provider/self-service/",
+    "appeal_url": "https://www.humanamilitary.com/content/humana-military-com/us/en/appeal.html",
+    "appeal_window_days": 90,
+    "appeal_notes": "Appeals must be filed within 90 days of the date of the EOB; submit online through provider self-service."
+  },
+  {
+    "payer_id": "ambetter_sc",
+    "name": "Ambetter from Absolute Total Care",
+    "type": "Marketplace",
+    "portal_name": "Ambetter Secure Provider Portal",
+    "portal_url": "https://provider.ambetterhealth.com/",
+    "appeal_url": "https://ambetter.absolutetotalcare.com/provider-resources/claims.html",
+    "appeal_window_days": 90,
+    "appeal_notes": "Reconsideration then formal appeal; both accepted through the secure provider portal."
+  }
+]

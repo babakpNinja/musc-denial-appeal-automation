@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC Health — Denial Appeal Automation</title>
+<link rel="icon" href="/assets/musc-logo-navy.png">
+<style>
+  :root{
+    --navy:#0B2C4A; --navy-2:#123c63; --teal:#00857D; --teal-2:#00a89e;
+    --gold:#C6912B; --bg:#F4F6F8; --card:#fff; --line:#E2E7EC;
+    --text:#1B2733; --muted:#63707E; --danger:#B3261E; --ok:#1E7B4F;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--text)}
+  a{color:var(--teal);text-decoration:none} a:hover{text-decoration:underline}
+  header{background:var(--navy);color:#fff;padding:14px 22px;display:flex;align-items:center;gap:16px;
+         position:sticky;top:0;z-index:20;box-shadow:0 2px 10px rgba(11,44,74,.18)}
+  header img{height:40px;filter:brightness(0) invert(1)}
+  header .t{font-size:17px;font-weight:600;letter-spacing:.2px}
+  header .s{font-size:12px;color:#A9C2D8}
+  header .sp{flex:1}
+  header .zip{background:var(--teal);color:#fff;padding:8px 14px;border-radius:7px;font-size:13px;font-weight:600}
+  header .zip:hover{background:var(--teal-2);text-decoration:none}
+  main{max-width:1400px;margin:0 auto;padding:20px 18px 60px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:20px}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .kpi .l{font-size:11.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
+  .kpi .v{font-size:27px;font-weight:700;color:var(--navy);margin-top:6px;line-height:1.15}
+  .kpi .d{font-size:12px;color:var(--muted);margin-top:3px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h2{margin:0 0 14px;font-size:14px;text-transform:uppercase;letter-spacing:.7px;color:var(--navy)}
+  .bar{display:grid;grid-template-columns:1fr 92px;gap:10px;align-items:center;margin-bottom:9px;font-size:13px}
+  .bar .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar .track{height:7px;background:#EDF1F4;border-radius:5px;margin-top:4px;overflow:hidden}
+  .bar .fill{height:100%;background:linear-gradient(90deg,var(--teal),var(--teal-2));border-radius:5px}
+  .bar .amt{text-align:right;font-variant-numeric:tabular-nums;color:var(--navy);font-weight:600}
+  .bar small{color:var(--muted);font-weight:400}
+  .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  input,select{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--text)}
+  input[type=search]{min-width:250px;flex:1}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
+     padding:8px 10px;border-bottom:2px solid var(--line);white-space:nowrap}
+  td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+  tbody tr{cursor:pointer} tbody tr:hover{background:#F7FAFC}
+  .money{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:#EAF2F8;color:var(--navy);white-space:nowrap}
+  .tag.mn{background:#FDECEA;color:var(--danger)} .tag.pa{background:#FFF4E0;color:#8A5A00}
+  .tag.mi{background:#EAF3FF;color:#144E8C} .tag.tf{background:#F0EAFB;color:#5B3E9E}
+  .pill{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;
+        background:#E6F4EE;color:var(--ok);text-transform:uppercase;letter-spacing:.4px}
+  .muted{color:var(--muted)}
+  .table-wrap{overflow-x:auto}
+  /* modal */
+  .overlay{position:fixed;inset:0;background:rgba(11,44,74,.55);display:none;z-index:50;padding:24px}
+  .overlay.on{display:block}
+  .modal{background:#fff;max-width:1150px;margin:0 auto;border-radius:14px;overflow:hidden;
+         max-height:calc(100vh - 48px);display:flex;flex-direction:column}
+  .modal .mh{background:var(--navy);color:#fff;padding:16px 20px;display:flex;align-items:flex-start;gap:14px}
+  .modal .mh h3{margin:0;font-size:17px} .modal .mh .sub{font-size:12.5px;color:#A9C2D8;margin-top:3px}
+  .modal .mh button{margin-left:auto;background:transparent;border:1px solid #3d5f80;color:#fff;
+        border-radius:8px;padding:6px 12px;cursor:pointer;font:inherit}
+  .mb{padding:18px 20px;overflow:auto}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:860px){.cols{grid-template-columns:1fr}}
+  .kv{width:100%;font-size:13px} .kv td{padding:5px 0;border-bottom:1px solid #F0F3F6}
+  .kv td:first-child{color:var(--muted);width:42%}
+  .sec{margin-bottom:16px}
+  .sec h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--navy);
+          border-bottom:2px solid var(--teal);display:inline-block;padding-bottom:3px}
+  .btn{display:inline-block;background:var(--teal);color:#fff;padding:9px 15px;border-radius:8px;
+       font-size:13.5px;font-weight:600;border:none;cursor:pointer;font-family:inherit}
+  .btn:hover{background:var(--teal-2);text-decoration:none}
+  .btn.alt{background:#fff;color:var(--navy);border:1px solid var(--line)}
+  .btn.alt:hover{background:#F1F5F8}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+  .quote{background:#FDF6E9;border-left:4px solid var(--gold);padding:10px 14px;font-size:13px;border-radius:0 8px 8px 0}
+  embed,iframe.pdf{width:100%;height:640px;border:1px solid var(--line);border-radius:8px}
+  ul.li{margin:0;padding-left:18px;font-size:13px} ul.li li{margin-bottom:3px}
+  footer{text-align:center;color:var(--muted);font-size:12px;padding:26px 16px 40px;line-height:1.7}
+  .badge-syn{background:#FFF4E0;color:#8A5A00;border:1px solid #F0DCB4;padding:3px 9px;border-radius:6px;font-size:11.5px}
+  .loading{padding:30px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <img src="/assets/musc-logo-navy.png" alt="MUSC">
+  <div>
+    <div class="t">Denial Appeal Automation</div>
+    <div class="s">MUSC Health · Revenue Cycle · AI-drafted payer appeals</div>
+  </div>
+  <div class="sp"></div>
+  <a class="zip" href="/letters.zip">⬇ Download all letters (.zip)</a>
+</header>
+
+<main>
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div class="card"><h2>Denied $ by insurance provider</h2><div id="byPayer"></div></div>
+    <div class="card"><h2>Denial reasons by cost</h2><div id="byReason"></div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:20px">
+    <h2>Payer appeal portals</h2>
+    <div class="table-wrap"><table><thead><tr>
+      <th>Insurance provider</th><th>Type</th><th>Portal</th><th>Denials</th>
+      <th style="text-align:right">Denied $</th><th>Appeal window</th><th>Upload / appeal link</th>
+    </tr></thead><tbody id="payerRows"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Denial cases &amp; appeal letters</h2>
+    <div class="filters">
+      <input type="search" id="q" placeholder="Search patient, MRN, claim, CPT, ICD-10, CARC…">
+      <select id="payerF"><option value="">All payers</option></select>
+      <select id="catF"><option value="">All denial reasons</option></select>
+      <span class="muted" id="count"></span>
+    </div>
+    <div class="table-wrap"><table><thead><tr>
+      <th>Patient</th><th>MRN</th><th>Payer</th><th>Service</th><th>CPT</th>
+      <th>Denial reason</th><th>CARC</th><th style="text-align:right">Denied</th>
+      <th>Deadline</th><th>Letter</th>
+    </tr></thead><tbody id="caseRows"><tr><td colspan="10" class="loading">Loading…</td></tr></tbody></table></div>
+  </div>
+</main>
+
+<footer>
+  <strong>All patient data on this site is synthetic</strong> (Synthea / FHIR R4 sandbox) — no PHI.<br>
+  Appeal letters are AI-drafted from the case record and require clinician / revenue-cycle review before submission.<br>
+  Demo built for MUSC Health · Medical University of South Carolina.
+</footer>
+
+<div class="overlay" id="overlay"><div class="modal">
+  <div class="mh">
+    <div><h3 id="mTitle">…</h3><div class="sub" id="mSub"></div></div>
+    <button onclick="closeModal()">✕ Close</button>
+  </div>
+  <div class="mb" id="mBody"></div>
+</div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => '$' + (n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtK = n => n>=1000 ? '$'+(n/1000).toFixed(1)+'k' : '$'+(n||0).toFixed(0);
+const esc = s => (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const catClass = c => ({'Medical necessity':'mn','Prior authorization':'pa','Missing information':'mi',
+                        'Timely filing':'tf'}[c]||'');
+let CASES = [], STATS = null;
+
+async function boot(){
+  STATS = await (await fetch('/api/stats')).json();
+  const t = STATS.totals;
+  $('#kpis').innerHTML = [
+    ['Patients', t.patients, 'synthetic FHIR records'],
+    ['Denied claims', t.denials, 'across ' + STATS.by_payer.length + ' payers'],
+    ['Revenue at risk', fmt(t.denied_total), 'total denied charges'],
+    ['Average denial', fmt(t.denied_avg), 'per claim'],
+    ['Appeal letters ready', t.denials, 'pre-generated PDFs'],
+  ].map(([l,v,d])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+
+  bars('#byPayer', STATS.by_payer.map(r=>({name:r.payer, val:r.denied_amount, sub:r.denials+' denials'})));
+  bars('#byReason', STATS.by_reason.map(r=>({name:r.category, val:r.denied_amount, sub:r.denials+' denials'})));
+
+  const payers = await (await fetch('/api/payers')).json();
+  $('#payerRows').innerHTML = payers.filter(p=>p.denials>0).map(p=>`<tr onclick="event.stopPropagation()">
+      <td><strong>${esc(p.name)}</strong></td><td class="muted">${esc(p.type)}</td>
+      <td>${esc(p.portal_name||'—')}</td><td>${p.denials}</td>
+      <td class="money">${fmt(p.denied_amount)}</td>
+      <td class="muted">${p.appeal_window_days? p.appeal_window_days+' days':'—'}</td>
+      <td><a href="${esc(p.appeal_url||p.portal_url)}" target="_blank" rel="noopener">Open appeals portal ↗</a></td>
+    </tr>`).join('');
+  $('#payerF').innerHTML += payers.filter(p=>p.denials>0)
+      .map(p=>`<option value="${p.payer_id}">${esc(p.name)} (${p.denials})</option>`).join('');
+  $('#catF').innerHTML += STATS.by_reason.map(r=>`<option value="${esc(r.category)}">${esc(r.category)} (${r.denials})</option>`).join('');
+
+  await loadCases();
+}
+
+function bars(sel, rows){
+  const max = Math.max(...rows.map(r=>r.val), 1);
+  $(sel).innerHTML = rows.map(r=>`<div class="bar">
+      <div><div class="n">${esc(r.name)}</div><div class="track"><div class="fill" style="width:${(r.val/max*100).toFixed(1)}%"></div></div></div>
+      <div class="amt">${fmtK(r.val)}<br><small>${esc(r.sub)}</small></div>
+    </div>`).join('');
+}
+
+async function loadCases(){
+  const p = new URLSearchParams({payer:$('#payerF').value, category:$('#catF').value, search:$('#q').value});
+  CASES = await (await fetch('/api/cases?'+p)).json();
+  $('#count').textContent = CASES.length + ' case' + (CASES.length===1?'':'s');
+  $('#caseRows').innerHTML = CASES.length ? CASES.map(c=>`<tr onclick="openCase('${c.denial_id}')">
+      <td><strong>${esc(c.full_name)}</strong><div class="muted">${c.age}y ${esc(c.gender||'')}</div></td>
+      <td class="muted">${esc(c.mrn)}</td>
+      <td>${esc(c.payer_name)}</td>
+      <td class="muted">${esc(c.service_date)}</td>
+      <td>${esc(c.cpt_code)}<div class="muted" style="max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.cpt_description)}</div></td>
+      <td><span class="tag ${catClass(c.category)}">${esc(c.category)}</span></td>
+      <td class="muted">${esc(c.carc_code)}</td>
+      <td class="money">${fmt(c.denied_amount)}</td>
+      <td class="muted">${esc(c.appeal_deadline)}</td>
+      <td>${c.letter_path?`<a href="/letters/${c.denial_id}.pdf?download=1" onclick="event.stopPropagation()">PDF ⬇</a>`
+                         :'<span class="muted">pending</span>'}</td>
+    </tr>`).join('') : '<tr><td colspan="10" class="loading">No cases match those filters.</td></tr>';
+}
+
+async function openCase(id){
+  $('#overlay').classList.add('on');
+  $('#mBody').innerHTML = '<div class="loading">Loading case…</div>';
+  const c = await (await fetch('/api/cases/'+id)).json();
+  $('#mTitle').textContent = c.full_name + ' — ' + c.payer_name;
+  $('#mSub').textContent = `MRN ${c.mrn} · Claim ${c.claim_id} · DOS ${c.service_date} · ${fmt(c.denied_amount)} denied`;
+  const kv = rows => '<table class="kv">' + rows.map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v??'—'}</td></tr>`).join('') + '</table>';
+  const list = (arr, f) => arr.length ? '<ul class="li">'+arr.map(f).join('')+'</ul>' : '<div class="muted">None recorded.</div>';
+  $('#mBody').innerHTML = `
+    <div class="btnrow">
+      <a class="btn" href="/letters/${c.denial_id}.pdf?download=1">⬇ Download appeal letter (PDF)</a>
+      <a class="btn alt" href="${esc(c.appeal_url||c.portal_url)}" target="_blank" rel="noopener">↗ Upload to ${esc(c.portal_name||c.payer_name)}</a>
+      <button class="btn alt" onclick="regen('${c.denial_id}',this)">↻ Regenerate letter</button>
+      <span class="pill">${esc(c.appeal_status||'pending')}</span>
+      <span class="badge-syn">synthetic data</span>
+    </div>
+    <div class="cols">
+      <div>
+        <div class="sec"><h4>Denial</h4>
+          ${kv([['Denial date',esc(c.denial_date)],['Category',esc(c.category)],
+                ['CARC',`<strong>${esc(c.carc_code)}</strong> — ${esc(c.carc_description)}`],
+                ['RARC',`${esc(c.rarc_code)} — ${esc(c.rarc_description)}`],
+                ['Denied amount',`<strong>${fmt(c.denied_amount)}</strong>`],
+                ['Appeal deadline',esc(c.appeal_deadline)]])}
+          <div class="quote" style="margin-top:10px">“${esc(c.payer_remark)}”</div>
+        </div>
+        <div class="sec"><h4>Claim</h4>
+          ${kv([['Claim ID',esc(c.claim_id)],['Date of service',esc(c.service_date)],
+                ['Place of service',esc(c.place_of_service)],
+                ['CPT',`${esc(c.cpt_code)} — ${esc(c.cpt_description)} (×${c.units})`],
+                ['Diagnosis',`${esc(c.icd10_primary)} — ${esc(c.icd10_primary_desc)}`],
+                ['Billed / allowed / paid',`${fmt(c.billed_amount)} / ${fmt(c.allowed_amount)} / ${fmt(c.paid_amount)}`],
+                ['Rendering provider',`${esc(c.rendering_provider)} (NPI ${esc(c.npi)})`],
+                ['Facility',esc(c.facility)]])}
+        </div>
+        <div class="sec"><h4>Coverage</h4>
+          ${kv([['Payer',esc(c.payer_name)],['Plan',esc(c.coverage?.plan_name)],
+                ['Member ID',esc(c.coverage?.member_id)],['Group',esc(c.coverage?.group_number)],
+                ['Appeal process',esc(c.appeal_notes)]])}
+        </div>
+      </div>
+      <div>
+        <div class="sec"><h4>AI argument</h4>
+          <div class="quote">${esc(c.argument_summary||'—')}</div>
+          <div class="muted" style="font-size:12px;margin-top:6px">Drafted ${esc(c.generated_at||'—')} · ${esc(c.model||'')}</div>
+        </div>
+        <div class="sec"><h4>Conditions</h4>
+          ${list(c.conditions, x=>`<li>${esc(x.display)} <span class="muted">(${esc(x.icd10||'n/a')}, ${esc(x.clinical_status||'')})</span></li>`)}</div>
+        <div class="sec"><h4>Procedures</h4>
+          ${list(c.procedures, x=>`<li>${esc(x.display)} <span class="muted">${esc(x.performed_date||'')}</span></li>`)}</div>
+        <div class="sec"><h4>Recent results</h4>
+          ${list(c.observations, x=>`<li>${esc(x.display)}: ${esc(x.value)} ${esc(x.unit||'')}</li>`)}</div>
+      </div>
+    </div>
+    <div class="sec" style="margin-top:6px"><h4>Appeal letter preview</h4>
+      <iframe class="pdf" src="/letters/${c.denial_id}.pdf#view=FitH" title="appeal letter"></iframe>
+    </div>`;
+}
+
+async function regen(id, btn){
+  btn.disabled = true; btn.textContent = '↻ Regenerating…';
+  const r = await fetch('/api/cases/'+id+'/regenerate', {method:'POST'});
+  btn.textContent = r.ok ? '✓ Regenerated' : '✗ Failed';
+  if (r.ok) setTimeout(()=>openCase(id), 400);
+}
+
+function closeModal(){ $('#overlay').classList.remove('on'); }
+$('#overlay').addEventListener('click', e => { if(e.target.id==='overlay') closeModal(); });
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeModal(); });
+let t; $('#q').addEventListener('input', ()=>{clearTimeout(t); t=setTimeout(loadCases,250)});
+$('#payerF').addEventListener('change', loadCases);
+$('#catF').addEventListener('change', loadCases);
+boot();
+</script>
+</body>
+</html>
