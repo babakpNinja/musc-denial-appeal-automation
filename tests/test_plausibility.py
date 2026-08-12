@@ -10,6 +10,7 @@ Run:  python -m pytest tests/test_plausibility.py -q
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 from datetime import date, datetime
@@ -89,6 +90,58 @@ def test_service_dates_are_inside_the_coverage_period_and_not_in_the_future():
 def test_claim_timeline_is_ordered():
     for c in CASES:
         assert c["service_date"] <= c["submitted_date"] <= c["denial_date"] < c["appeal_deadline"], c
+
+
+def _days_left(c) -> int:
+    return (datetime.strptime(c["appeal_deadline"], "%Y-%m-%d").date() - date.today()).days
+
+
+def test_the_queue_is_mostly_still_actionable():
+    """A work queue of expired deadlines is a dead demo, not a backlog.
+
+    Timelines are anchored to today at build time (build_db._window_fraction), so
+    this holds on whatever day the database was last built.
+    """
+    left = [_days_left(c) for c in CASES]
+    open_now = sum(1 for d in left if d > 0)
+    assert open_now / len(left) >= 0.70, f"only {open_now}/{len(left)} cases can still be appealed"
+
+
+def test_a_few_deadlines_are_lapsed_or_imminent():
+    """...but not *all* of them are comfortable: the urgency is the point."""
+    left = [_days_left(c) for c in CASES]
+    assert any(d < 0 for d in left), "nothing overdue -- the escalation path is untested"
+    assert sum(1 for d in left if d < 0) <= len(left) * 0.20, "too much of the queue has lapsed"
+    assert any(0 <= d <= 14 for d in left), "nothing due soon -- the amber warning never shows"
+
+
+def test_lapsed_deadlines_are_recent_misses():
+    """A deadline blown by a year reads as neglect; by a fortnight, as a backlog."""
+    for c in CASES:
+        assert _days_left(c) > -60, f"deadline lapsed long ago: {c['denial_id']} {c['appeal_deadline']}"
+
+
+def test_deadline_matches_the_payers_contractual_window():
+    windows = {p["payer_id"]: p["appeal_window_days"] for p in build_db.PAYERS}
+    for c in rows("SELECT denial_id, payer_id, denial_date, appeal_deadline FROM denials"):
+        denied = datetime.strptime(c["denial_date"], "%Y-%m-%d").date()
+        due = datetime.strptime(c["appeal_deadline"], "%Y-%m-%d").date()
+        assert (due - denied).days == windows[c["payer_id"]], c
+
+
+def test_claim_ids_carry_no_date():
+    """Ids must survive a rebuild on a different day, or the letter cache dies."""
+    for c in rows("SELECT claim_id, denial_id FROM denials JOIN claims USING(claim_id)"):
+        assert not re.search(r"20\d{6}", c["claim_id"]), c
+        assert c["denial_id"] == f"DEN-{c['claim_id']}"
+
+
+def test_window_fraction_spans_the_deadline():
+    lo = build_db._window_fraction(45)
+    hi = build_db._window_fraction(419)
+    assert lo == build_db.AGE_MIN_FRACTION and hi == build_db.AGE_MAX_FRACTION
+    assert lo < 1 < hi, "the range has to straddle the deadline to produce both states"
+    assert build_db._window_fraction(45) <= build_db._window_fraction(200) <= hi
 
 
 def test_is_billable_rules():

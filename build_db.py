@@ -293,6 +293,26 @@ def _seeded(patient_id: str) -> random.Random:
     return random.Random(int(hashlib.sha256(patient_id.encode()).hexdigest()[:12], 16))
 
 
+# How far a denial sits into its payer's appeal window, as a fraction of that
+# window: 0.03 = denied days ago with the whole window left, 1.0 = due today,
+# >1.0 = the filing deadline has passed. The top of the range is deliberately a
+# little over 1 so a realistic minority of the queue is already lapsed.
+AGE_MIN_FRACTION = 0.03
+AGE_MAX_FRACTION = 1.12
+
+
+def _window_fraction(draw: int, lo: int = 45, hi: int = 420) -> float:
+    """Map a legacy ``rnd.randrange(lo, hi)`` day count onto a window fraction.
+
+    The draw itself is kept (same call, same position in the RNG sequence) so
+    rebuilding does not reshuffle any other per-claim choice; only its meaning
+    changed from "days before today" to "share of the appeal window used up".
+    """
+    span = max(hi - 1 - lo, 1)
+    frac = (min(max(draw, lo), hi - 1) - lo) / span
+    return AGE_MIN_FRACTION + frac * (AGE_MAX_FRACTION - AGE_MIN_FRACTION)
+
+
 def _lookup(text: str, table, default):
     t = (text or "").lower()
     for keys, val in table:
@@ -392,7 +412,10 @@ def dump_drafts(db_path: Path = DB_PATH, cache_path: Path = DRAFTS_PATH) -> int:
         return 0
     cache = {r["denial_id"]: r for r in rows if r.get("sections_json")}
     merged = json.loads(cache_path.read_text()) if cache_path.exists() else {}
-    merged.update(cache)
+    for did, row in cache.items():
+        # the appeals table has no draft_dates column; keep the cache's own record
+        # of which dates the prose was written against (see retime_drafts.py)
+        merged[did] = {**merged.get(did, {}), **row}
     cache_path.write_text(json.dumps(merged, indent=1, sort_keys=True))
     return len(cache)
 
@@ -416,6 +439,19 @@ def restore_drafts(con: sqlite3.Connection, cache_path: Path = DRAFTS_PATH) -> i
         n += 1
     con.commit()
     return n
+
+
+def retime_cached_drafts(db_path: Path = DB_PATH, cache_path: Path = DRAFTS_PATH) -> int:
+    """Re-point restored drafts at the dates this build gave their claims."""
+    if not cache_path.exists():
+        return 0
+    import retime_drafts
+
+    cache = json.loads(cache_path.read_text())
+    cache, changed = retime_drafts.retime(cache, retime_drafts.current_facts(db_path))
+    cache_path.write_text(json.dumps(cache, indent=1, sort_keys=True))
+    retime_drafts.write_back(cache, db_path)
+    return len(changed)
 
 
 def load_bundles() -> list[dict]:
@@ -590,31 +626,41 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
             secondary = others[0]["icd10"][0] if others else ""
             provider, npi, _spec = PROVIDERS[rnd.randrange(len(PROVIDERS))]
             # Synthea encounters span decades; the billing overlay is shifted into
-            # the current revenue-cycle window so appeal deadlines are meaningful.
-            service_date = (date.today() - timedelta(days=rnd.randrange(45, 420))).isoformat()
-            claim_id = f"MUSC-{service_date.replace('-', '')}-{pid[:4].upper()}-{i + 1}"
-            submitted = (
-                datetime.strptime(service_date, "%Y-%m-%d") + timedelta(days=rnd.randrange(2, 20))
-            ).strftime("%Y-%m-%d")
+            # the current revenue-cycle window. The timeline is anchored at the
+            # *denial* and worked backwards so the appeal deadline lands a
+            # payer-window-relative distance from today (see _window_fraction) --
+            # anchoring at the service date instead let deadlines lapse as the demo aged.
+            window = payer["appeal_window_days"]
+            elapsed = round(_window_fraction(rnd.randrange(45, 420)) * window)
+            service_to_submit = rnd.randrange(2, 20)
+            # the two draws the claims INSERT used to make inline, kept here so the
+            # RNG sequence (and therefore every cached letter draft) is unchanged
+            allowed = round(billed * rnd.uniform(0.45, 0.75), 2)
+            facility = rnd.choice(FACILITIES)
+
+            reason = rnd.choices(DENIAL_REASONS, weights=weights, k=1)[0]
+            submit_to_denial = rnd.randrange(10, 45)
+            denial = date.today() - timedelta(days=elapsed)
+            submitted = (denial - timedelta(days=submit_to_denial)).isoformat()
+            service_date = (
+                denial - timedelta(days=submit_to_denial + service_to_submit)
+            ).isoformat()
+            denial_date = denial.isoformat()
+            deadline = (denial + timedelta(days=window)).isoformat()
+            # ids stay stable across rebuilds: they carry no date, so the letter
+            # cache survives the timeline moving with today's date
+            claim_id = f"MUSC-{pid[:4].upper()}-{i + 1}"
             con.execute(
                 "INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (claim_id, pid, payer["payer_id"], enc["id"], service_date, enc["start"], submitted,
                  PLACE_OF_SERVICE.get(enc["class"], "11 - Office"), cpt, cpt_desc,
                  "0450" if enc["class"] == "EMER" else "0510", units,
                  primary[0], primary[1], secondary,
-                 billed, round(billed * rnd.uniform(0.45, 0.75), 2), 0.0, billed,
-                 provider, npi, rnd.choice(FACILITIES), "DENIED"),
+                 billed, allowed, 0.0, billed,
+                 provider, npi, facility, "DENIED"),
             )
             stats["claims"] += 1
 
-            reason = rnd.choices(DENIAL_REASONS, weights=weights, k=1)[0]
-            denial_date = (
-                datetime.strptime(submitted, "%Y-%m-%d") + timedelta(days=rnd.randrange(10, 45))
-            ).strftime("%Y-%m-%d")
-            deadline = (
-                datetime.strptime(denial_date, "%Y-%m-%d")
-                + timedelta(days=payer["appeal_window_days"])
-            ).strftime("%Y-%m-%d")
             remark = {
                 "Medical necessity": "Documentation submitted does not establish that the service was reasonable and necessary for the diagnosis reported.",
                 "Prior authorization": "No prior authorization on file for the date of service billed.",
@@ -638,6 +684,9 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
     con.commit()
     stats["drafts_restored"] = restore_drafts(con, drafts_path)
     con.close()
+    # the timeline moved with today's date, so the cached prose now cites dates
+    # this claim no longer has -- re-point it (textual, no LLM calls)
+    stats["drafts_retimed"] = retime_cached_drafts(db_path, drafts_path)
     return stats
 
 

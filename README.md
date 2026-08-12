@@ -28,6 +28,7 @@ every case, dollar figure and payer appeal portal behind one dashboard.
 ingest.py            pull FHIR bundles into data/raw/
 build_db.py          raw JSON  →  data/musc_appeals.db   (deterministic, re-runnable)
 generate_letters.py  DB → LLM draft → MUSC PDF → appeals table
+retime_drafts.py     re-point cached drafts at the rebuilt timeline (no LLM calls)
 letterhead.py        MUSC letterhead renderer (ReportLab)
 app.py               FastAPI API + dashboard
 static/index.html    dashboard UI (no build step, no CDN)
@@ -37,6 +38,7 @@ tests/test_system.py   end-to-end checks (DB, every PDF, API, UI)
 tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
 tests/test_plausibility.py  ages, deceased patients, claim timeline, draft cache
 tests/test_batch.py    bulk status changes (incl. partial failure) + payer batches
+tests/test_retime.py   date re-pointing when a rebuild moves the timeline
 tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
 
@@ -61,6 +63,21 @@ python -m pytest tests -q
 persisted to `appeals.sections_json` so a redeploy or a letterhead tweak never re-bills the model.
 `build_db.py` drops the database when it rebuilds, so it exports those drafts to
 `data/letter_drafts.json` first and restores them afterwards — rebuilding is free.
+
+### Why the timeline moves but the ids don't
+
+A denial queue is only interesting while the deadlines are live, so `build_db.py` anchors each
+case to **today**: it draws how far into the payer's contractual appeal window the denial sits
+(`_window_fraction`, 3 %–112 %) and works backwards to the denial, submission and service dates.
+That keeps ~80 % of the queue still appealable, a handful due inside 14 days and a few recently
+lapsed, on whatever day the database was last built — rather than the whole board rotting into
+red as the demo ages.
+
+Claim ids therefore carry no date (`MUSC-<patient>-<n>` / `DEN-MUSC-<patient>-<n>`) so the letter
+cache still matches after a rebuild, and `retime_drafts.py` rewrites the dates the cached prose
+quotes — in every format the letters use — so a rebuilt demo never argues about a date the claim
+no longer has. `build_db.py` runs it automatically; run it by hand with `--apply` after any
+manual date surgery. It is pure text substitution: no model calls, no re-drafting.
 
 ### Who gets billed
 
