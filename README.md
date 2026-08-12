@@ -1,5 +1,7 @@
 # MUSC Health — AI Denial Appeal Automation
 
+**Live:** https://musc-appeals-production.up.railway.app  ·  deploy repo: `babakpNinja/musc-denial-appeal-automation`
+
 Turns payer claim denials into ready-to-submit, MUSC-letterhead appeal letters, and puts
 every case, dollar figure and payer appeal portal behind one dashboard.
 
