@@ -3,6 +3,12 @@ __pycache__/
 data/musc_appeals.db-wal
 data/musc_appeals.db-shm
 letters/_*.png
+# Throwaway screenshots: `python tests/shots.py <url> _live` and the plausibility
+# pass write these wherever they are run from. Nothing reads them, and a `git add
+# -A` once swept 2.9 MB of them into this repo (#61). No slash, so both the app
+# root and tests/ are covered.
+_live*.png
+_plaus*.png
 # The 67 letter PDFs are 100% derivable from data/letter_drafts.json + the DB
 # (`python generate_letters.py --rerender`, ~6s, no model calls). Tracking them
 # put 5.8 MB into this repo's history every time the timeline was rebuilt, so
