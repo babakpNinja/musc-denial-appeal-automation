@@ -16,10 +16,11 @@ Safe to run often: a rebuild rewrites the DB and re-renders all 67 letters (they
 cite dates), so "files changed" is not the signal — the run only pushes once the
 timeline has drifted ``--min-drift-days`` or more than ``--max-lapsed`` cases have run past
 their deadline. It asks the live ``/api/health`` how old the deployed data is
-before rebuilding anything, so a fresh board costs one request, not a rebuild. Any failing test aborts before anything is pushed. After the
-push it waits until the *new* container actually serves the new timeline before
-touching workflow state, because writes to the old one are about to be thrown
-away.
+before rebuilding anything, so a fresh board costs one request, not a rebuild. Any
+failing test aborts before anything is pushed. After the push it waits — via
+``mirror.py push --wait``, which polls until the deploy reports back the commit it
+just pushed — before touching workflow state, because writes to the container that
+is about to be replaced are thrown away with it.
 """
 
 from __future__ import annotations
