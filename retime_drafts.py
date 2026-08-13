@@ -32,6 +32,21 @@ DRAFTS_PATH = APP_DIR / "data" / "letter_drafts.json"
 DATE_KEYS = ("service_date", "submitted_date", "denial_date", "appeal_deadline")
 TEXT_FIELDS = ("letter_text", "argument_summary", "sections_json")
 
+# Any medical record number appearing in a letter belongs to that letter's own
+# patient, so a draft citing a different one is always wrong and there is exactly
+# one right answer. This is not an old->new pair like the dates: builds before
+# `mrn_for()` derived the MRN from `hash()`, which is salted per process, so a
+# single draft could quote two different numbers written by two generation runs.
+# Pinning them all to the database's value repairs those and is a no-op afterwards.
+MRN_RE = re.compile(r"MUSC\d{7}")
+
+# The facts a letter argues *from*, which this tool cannot repair. A moved date is
+# a substitution; a moved dollar amount or denial reason means the prose is about a
+# different claim, and only the model can rewrite that. They are recorded so the
+# drift is loud: a draft whose claim changed under a stable id would otherwise
+# restore, render and read perfectly while being wrong (#8).
+FACT_KEYS = ("payer_id", "cpt_code", "billed_amount", "carc_code", "category")
+
 
 def date_forms(iso: str) -> list[str]:
     """Every rendering of ``iso`` that appears in a letter, in a fixed order.
@@ -90,16 +105,59 @@ def current_facts(db_path: Path = DB_PATH) -> dict[str, dict]:
     con.row_factory = sqlite3.Row
     rows = con.execute(
         "SELECT d.denial_id, d.claim_id, c.service_date, c.submitted_date,"
-        "       d.denial_date, d.appeal_deadline"
+        "       d.denial_date, d.appeal_deadline, p.mrn,"
+        "       d.payer_id, c.cpt_code, c.billed_amount, d.carc_code, d.category"
         "  FROM denials d JOIN claims c ON c.claim_id = d.claim_id"
+        "  JOIN patients p ON p.patient_id = d.patient_id"
     ).fetchall()
     con.close()
     return {r["denial_id"]: dict(r) for r in rows}
 
 
-def retime(cache: dict, facts: dict[str, dict]) -> tuple[dict, list[str]]:
-    """Rewrite every draft whose recorded dates no longer match the database."""
+def wrong_mrns(text: str, mrn: str) -> set[str]:
+    """Every MRN in ``text`` that is not this case's. Empty when there is nothing to fix."""
+    if not text or not mrn:
+        return set()
+    return set(MRN_RE.findall(text)) - {mrn}
+
+
+def fix_mrn(text: str, mrn: str) -> str:
+    if not text or not mrn:
+        return text
+    return MRN_RE.sub(mrn, text)
+
+
+def rewritten_claims(cache: dict, facts: dict[str, dict]) -> dict[str, dict]:
+    """Cases whose claim changed under an unchanged id — what no re-point can fix.
+
+    A draft records ``draft_facts`` the first time it is seen. If a later build
+    hands the same denial id a different amount, CPT, payer or denial reason, the
+    cached prose is arguing the wrong case: it will still restore and still render.
+    The usual cause is a change to the draw order inside the claim loop, which is
+    why extra volume gets its own RNG stream instead.
+    """
+    out = {}
+    for did, row in cache.items():
+        now, was = facts.get(did), row.get("draft_facts")
+        if not now or not was:
+            continue
+        moved = {k: (was[k], now[k]) for k in FACT_KEYS
+                 if k in was and was[k] != now.get(k)}
+        if moved:
+            out[did] = moved
+    return out
+
+
+def retime(cache: dict, facts: dict[str, dict]) -> tuple[dict, list[str], list[str]]:
+    """Rewrite every draft whose recorded dates or MRN no longer match the database.
+
+    Returns the cache, the cases whose dates were re-pointed, and the cases that
+    were citing an MRN belonging to nobody — kept apart because a stale date is
+    routine (the timeline moves daily) and a stale MRN means the letter and the
+    chart disagree about who the patient is.
+    """
     changed: list[str] = []
+    remrn: list[str] = []
     for did, row in cache.items():
         now = facts.get(did)
         was = row.get("draft_dates")
@@ -112,8 +170,17 @@ def retime(cache: dict, facts: dict[str, dict]) -> tuple[dict, list[str]]:
                     if row.get(field):
                         row[field] = rewrite(row[field], pairs)
                 changed.append(did)
+        mrn = now.get("mrn")
+        if any(wrong_mrns(row.get(f), mrn) for f in TEXT_FIELDS):
+            for field in TEXT_FIELDS:
+                if row.get(field):
+                    row[field] = fix_mrn(row[field], mrn)
+            remrn.append(did)
         row["draft_dates"] = {k: now[k] for k in ("claim_id", "denial_id") + DATE_KEYS}
-    return cache, changed
+        # adopted, never corrected: `rewritten_claims` compares against what was
+        # recorded, so it has to be written after that comparison has been made
+        row.setdefault("draft_facts", {k: now[k] for k in FACT_KEYS if k in now})
+    return cache, changed, remrn
 
 
 def write_back(cache: dict, db_path: Path = DB_PATH) -> int:
@@ -143,11 +210,25 @@ def main() -> None:
     cache = json.loads(args.cache.read_text())
     facts = current_facts(args.db)
     orphans = [d for d in cache if d not in facts]
-    cache, changed = retime(cache, facts)
+    rewritten = rewritten_claims(cache, facts)
+    cache, changed, remrn = retime(cache, facts)
     undrafted = [d for d in facts if d not in cache]
 
     print(f"drafts {len(cache)} | cases {len(facts)} | retimed {len(changed)} "
+          f"| mrn corrected {len(remrn)} "
           f"| orphaned drafts {len(orphans)} | cases without a draft {len(undrafted)}")
+    if remrn:
+        print("  ! these drafts named an MRN their patient does not have: "
+              + ", ".join(remrn[:5]) + ("…" if len(remrn) > 5 else ""))
+    if rewritten:
+        print(f"  ! {len(rewritten)} draft(s) argue a claim the database no longer has "
+              "under that id — a re-point cannot fix this, they need re-drafting:")
+        for did, moved in list(rewritten.items())[:5]:
+            print(f"      {did}: " + ", ".join(f"{k} {a} -> {b}" for k, (a, b) in moved.items()))
+    no_mrn = [d for d, f in facts.items() if not f.get("mrn")]
+    if no_mrn:
+        print(f"  ! {len(no_mrn)} case(s) have no MRN in the database, so their letters "
+              "could not be checked")
     if args.apply:
         args.cache.write_text(json.dumps(cache, indent=1, sort_keys=True))
         print(f"updated appeals rows: {write_back(cache, args.db)}")

@@ -44,6 +44,12 @@ PAYERS = json.loads((HERE / "data" / "payers.json").read_text())
 # service date. Synthea hands us centenarians and patients who died in 1993.
 MAX_CLAIM_AGE = 95
 
+# How much extra volume the second RNG stream adds per patient, and the ceiling on
+# a single patient's denied claims. Four open denials for one person inside a ~14
+# month window is a heavy but real case; more starts to read as generated.
+EXTRA_CLAIMS = [0, 0, 0, 1, 1, 2]
+MAX_CLAIMS_PER_PATIENT = 4
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 
@@ -298,6 +304,20 @@ def _seeded(patient_id: str) -> random.Random:
     return random.Random(int(hashlib.sha256(patient_id.encode()).hexdigest()[:12], 16))
 
 
+def mrn_for(patient_id: str) -> str:
+    """The patient's medical record number — the same one on every rebuild.
+
+    This used to be ``abs(hash(pid))``, and ``hash()`` on a str is salted per
+    *process*: every rebuild minted a new MRN for everybody. Nothing keys on the
+    MRN, so nothing broke loudly — but the cached letters quote it in prose, so
+    each generation run baked a different number into a different field. One live
+    PDF ended up naming two MRNs for its own patient, neither of them the one the
+    dashboard showed. Derive it from the same digest as the patient's RNG seed.
+    """
+    digest = int(hashlib.sha256(patient_id.encode()).hexdigest()[:12], 16)
+    return "MUSC" + str(digest % 10_000_000).zfill(7)
+
+
 # How far a denial sits into its payer's appeal window, as a fraction of that
 # window: 0.03 = denied days ago with the whole window left, 1.0 = due today,
 # >1.0 = the filing deadline has passed. The top of the range is deliberately a
@@ -420,7 +440,15 @@ def dump_drafts(db_path: Path = DB_PATH, cache_path: Path = DRAFTS_PATH) -> int:
     for did, row in cache.items():
         # the appeals table has no draft_dates column; keep the cache's own record
         # of which dates the prose was written against (see retime_drafts.py)
-        merged[did] = {**merged.get(did, {}), **row}
+        was = merged.get(did, {})
+        keep = dict(was)
+        if was.get("sections_json") and was["sections_json"] != row.get("sections_json"):
+            # the letter was re-drafted, so it argues from today's claim: the
+            # recorded fingerprint describes prose that no longer exists, and
+            # keeping it would report drift on every build from here on
+            keep.pop("draft_facts", None)
+            keep.pop("draft_dates", None)
+        merged[did] = {**keep, **row}
     cache_path.write_text(json.dumps(merged, indent=1, sort_keys=True))
     return len(cache)
 
@@ -446,17 +474,110 @@ def restore_drafts(con: sqlite3.Connection, cache_path: Path = DRAFTS_PATH) -> i
     return n
 
 
-def retime_cached_drafts(db_path: Path = DB_PATH, cache_path: Path = DRAFTS_PATH) -> int:
-    """Re-point restored drafts at the dates this build gave their claims."""
+def retime_cached_drafts(db_path: Path = DB_PATH,
+                         cache_path: Path = DRAFTS_PATH) -> tuple[int, int]:
+    """Re-point restored drafts at the dates and MRN this build gave their claims.
+
+    Returns (dates re-pointed, MRNs corrected). The second number should be zero on
+    every build after the one that made ``mrn_for`` deterministic; if it is not, a
+    letter was naming a patient the chart does not have.
+    """
     if not cache_path.exists():
-        return 0
+        return 0, 0
     import retime_drafts
 
     cache = json.loads(cache_path.read_text())
-    cache, changed = retime_drafts.retime(cache, retime_drafts.current_facts(db_path))
+    cache, changed, remrn = retime_drafts.retime(cache, retime_drafts.current_facts(db_path))
     cache_path.write_text(json.dumps(cache, indent=1, sort_keys=True))
     retime_drafts.write_back(cache, db_path)
-    return len(changed)
+    return len(changed), len(remrn)
+
+
+PAYER_REMARKS = {
+    "Medical necessity": "Documentation submitted does not establish that the service was reasonable and necessary for the diagnosis reported.",
+    "Prior authorization": "No prior authorization on file for the date of service billed.",
+    "Missing information": "Claim cannot be adjudicated; required data element(s) are missing or invalid.",
+    "Coding / clinical validation": "The diagnosis code reported does not support the procedure billed.",
+    "Benefit / non-covered": "Service is excluded under the member's plan benefit document.",
+    "Frequency / utilization": "Units billed exceed the plan's allowable frequency for this service.",
+    "Timely filing": "Claim was received after the contractual filing deadline.",
+    "Duplicate": "Claim appears to duplicate a previously adjudicated claim.",
+    "Eligibility": "Member was not eligible for benefits on the date of service billed.",
+}
+
+
+def write_claim(con: sqlite3.Connection, rnd: random.Random, case: dict,
+                enc: dict, i: int) -> str:
+    """One denied claim + its denial, grounded in ``enc``. Returns the claim id.
+
+    Every draw this makes comes from ``rnd`` in this exact order: the cached LLM
+    letter for ``DEN-<claim_id>`` was written against the values these draws
+    produce, so reordering them rewrites a claim without changing its id. Callers
+    pass the stream they own (see the two loops in ``build``) — never a shared one.
+    """
+    pid, payer, conditions, procedures = (case["pid"], case["payer"],
+                                          case["conditions"], case["procedures"])
+    proc_near = next(
+        (p for p in procedures if p["date"] and p["date"][:7] == enc["start"][:7]), None
+    )
+    src_text = " ".join(
+        filter(None, [proc_near["display"] if proc_near else "", enc["type"], enc["reason"], enc["class"]])
+    )
+    cpt, cpt_desc, base = _lookup(src_text, CPT_MAP, DEFAULT_CPT)
+    if enc["class"] == "IMP" and base < 5000:
+        cpt, cpt_desc, base = ("99223", "Initial hospital care, high complexity", 1850)
+    units = rnd.choice([1, 1, 1, 2])
+    billed = round(base * units * rnd.uniform(0.85, 1.6), 2)
+    # primary dx: the recorded condition whose text best overlaps the
+    # billed service, else the most recent active condition
+    primary_cond = _best_condition(conditions, src_text)
+    primary = primary_cond["icd10"] if primary_cond else DEFAULT_ICD
+    others = [c for c in conditions if c is not primary_cond]
+    secondary = others[0]["icd10"][0] if others else ""
+    provider, npi, _spec = PROVIDERS[rnd.randrange(len(PROVIDERS))]
+    # Synthea encounters span decades; the billing overlay is shifted into
+    # the current revenue-cycle window. The timeline is anchored at the
+    # *denial* and worked backwards so the appeal deadline lands a
+    # payer-window-relative distance from today (see _window_fraction) --
+    # anchoring at the service date instead let deadlines lapse as the demo aged.
+    window = payer["appeal_window_days"]
+    elapsed = round(_window_fraction(rnd.randrange(45, 420)) * window)
+    service_to_submit = rnd.randrange(2, 20)
+    # the two draws the claims INSERT used to make inline, kept here so the
+    # RNG sequence (and therefore every cached letter draft) is unchanged
+    allowed = round(billed * rnd.uniform(0.45, 0.75), 2)
+    facility = rnd.choice(FACILITIES)
+
+    reason = rnd.choices(DENIAL_REASONS, weights=case["weights"], k=1)[0]
+    submit_to_denial = rnd.randrange(10, 45)
+    denial = date.today() - timedelta(days=elapsed)
+    submitted = (denial - timedelta(days=submit_to_denial)).isoformat()
+    service_date = (
+        denial - timedelta(days=submit_to_denial + service_to_submit)
+    ).isoformat()
+    denial_date = denial.isoformat()
+    deadline = (denial + timedelta(days=window)).isoformat()
+    # ids stay stable across rebuilds: they carry no date, so the letter
+    # cache survives the timeline moving with today's date
+    claim_id = f"MUSC-{pid[:4].upper()}-{i + 1}"
+    con.execute(
+        "INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (claim_id, pid, payer["payer_id"], enc["id"], service_date, enc["start"], submitted,
+         PLACE_OF_SERVICE.get(enc["class"], "11 - Office"), cpt, cpt_desc,
+         "0450" if enc["class"] == "EMER" else "0510", units,
+         primary[0], primary[1], secondary,
+         billed, allowed, 0.0, billed,
+         provider, npi, facility, "DENIED"),
+    )
+    con.execute(
+        "INSERT INTO denials VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (f"DEN-{claim_id}", claim_id, pid, payer["payer_id"], denial_date,
+         reason["carc_code"], reason["carc_description"], reason["rarc_code"],
+         reason["rarc_description"], reason["category"],
+         PAYER_REMARKS[reason["category"]], deadline, billed,
+         0 if reason["carc_code"] == "29" else 1, "SYNTHETIC"),
+    )
+    return claim_id
 
 
 def load_bundles() -> list[dict]:
@@ -493,7 +614,8 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
             ),
         )
 
-    stats = {"patients": 0, "billable_patients": 0, "claims": 0, "denials": 0, "drafts_cached": drafted}
+    stats = {"patients": 0, "billable_patients": 0, "claims": 0, "denials": 0,
+             "extra_claims": 0, "drafts_cached": drafted}
     weights = [d["weight"] for d in DENIAL_REASONS]
 
     for bundle in load_bundles():
@@ -508,7 +630,7 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
             (t.get("value") for t in pat.get("telecom", []) if t.get("system") == "phone"),
             "",
         )
-        mrn = "MUSC" + str(abs(hash(pid)) % 10_000_000).zfill(7)
+        mrn = mrn_for(pid)
         birth = _dt(pat.get("birthDate"))
         deceased = _dt(pat.get("deceasedDateTime"))
         # For the deceased, "age" is age at death — age-since-birth would read as
@@ -620,80 +742,32 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
         billable.sort(key=lambda e: e["start"], reverse=True)
         billable = billable[:6]
         n_claims = min(len(billable), rnd.choice([1, 1, 2, 2, 3]))
+        case = {"pid": pid, "payer": payer, "conditions": conditions,
+                "procedures": procedures, "weights": weights}
         for i, enc in enumerate(billable[:n_claims]):
-            proc_near = next(
-                (p for p in procedures if p["date"] and p["date"][:7] == enc["start"][:7]), None
-            )
-            src_text = " ".join(
-                filter(None, [proc_near["display"] if proc_near else "", enc["type"], enc["reason"], enc["class"]])
-            )
-            cpt, cpt_desc, base = _lookup(src_text, CPT_MAP, DEFAULT_CPT)
-            if enc["class"] == "IMP" and base < 5000:
-                cpt, cpt_desc, base = ("99223", "Initial hospital care, high complexity", 1850)
-            units = rnd.choice([1, 1, 1, 2])
-            billed = round(base * units * rnd.uniform(0.85, 1.6), 2)
-            # primary dx: the recorded condition whose text best overlaps the
-            # billed service, else the most recent active condition
-            primary_cond = _best_condition(conditions, src_text)
-            primary = primary_cond["icd10"] if primary_cond else DEFAULT_ICD
-            others = [c for c in conditions if c is not primary_cond]
-            secondary = others[0]["icd10"][0] if others else ""
-            provider, npi, _spec = PROVIDERS[rnd.randrange(len(PROVIDERS))]
-            # Synthea encounters span decades; the billing overlay is shifted into
-            # the current revenue-cycle window. The timeline is anchored at the
-            # *denial* and worked backwards so the appeal deadline lands a
-            # payer-window-relative distance from today (see _window_fraction) --
-            # anchoring at the service date instead let deadlines lapse as the demo aged.
-            window = payer["appeal_window_days"]
-            elapsed = round(_window_fraction(rnd.randrange(45, 420)) * window)
-            service_to_submit = rnd.randrange(2, 20)
-            # the two draws the claims INSERT used to make inline, kept here so the
-            # RNG sequence (and therefore every cached letter draft) is unchanged
-            allowed = round(billed * rnd.uniform(0.45, 0.75), 2)
-            facility = rnd.choice(FACILITIES)
-
-            reason = rnd.choices(DENIAL_REASONS, weights=weights, k=1)[0]
-            submit_to_denial = rnd.randrange(10, 45)
-            denial = date.today() - timedelta(days=elapsed)
-            submitted = (denial - timedelta(days=submit_to_denial)).isoformat()
-            service_date = (
-                denial - timedelta(days=submit_to_denial + service_to_submit)
-            ).isoformat()
-            denial_date = denial.isoformat()
-            deadline = (denial + timedelta(days=window)).isoformat()
-            # ids stay stable across rebuilds: they carry no date, so the letter
-            # cache survives the timeline moving with today's date
-            claim_id = f"MUSC-{pid[:4].upper()}-{i + 1}"
-            con.execute(
-                "INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (claim_id, pid, payer["payer_id"], enc["id"], service_date, enc["start"], submitted,
-                 PLACE_OF_SERVICE.get(enc["class"], "11 - Office"), cpt, cpt_desc,
-                 "0450" if enc["class"] == "EMER" else "0510", units,
-                 primary[0], primary[1], secondary,
-                 billed, allowed, 0.0, billed,
-                 provider, npi, facility, "DENIED"),
-            )
+            write_claim(con, rnd, case, enc, i)
             stats["claims"] += 1
-
-            remark = {
-                "Medical necessity": "Documentation submitted does not establish that the service was reasonable and necessary for the diagnosis reported.",
-                "Prior authorization": "No prior authorization on file for the date of service billed.",
-                "Missing information": "Claim cannot be adjudicated; required data element(s) are missing or invalid.",
-                "Coding / clinical validation": "The diagnosis code reported does not support the procedure billed.",
-                "Benefit / non-covered": "Service is excluded under the member's plan benefit document.",
-                "Frequency / utilization": "Units billed exceed the plan's allowable frequency for this service.",
-                "Timely filing": "Claim was received after the contractual filing deadline.",
-                "Duplicate": "Claim appears to duplicate a previously adjudicated claim.",
-                "Eligibility": "Member was not eligible for benefits on the date of service billed.",
-            }[reason["category"]]
-            con.execute(
-                "INSERT INTO denials VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (f"DEN-{claim_id}", claim_id, pid, payer["payer_id"], denial_date,
-                 reason["carc_code"], reason["carc_description"], reason["rarc_code"],
-                 reason["rarc_description"], reason["category"], remark, deadline, billed,
-                 0 if reason["carc_code"] == "29" else 1, "SYNTHETIC"),
-            )
             stats["denials"] += 1
+
+        # ---- extra volume, drawn from a stream of its own (#8) -------------
+        # The queue above is thin (one plausibility pass removed 15 of 50
+        # patients), but widening `n_claims` is not the way to fix it: every
+        # later draw for this patient would shift, so DEN-MUSC-17FF-1 would keep
+        # its id while silently becoming a different claim — and the cached LLM
+        # draft under that id would then describe a service, amount and denial
+        # reason the row no longer has. Stale prose under a stable key is worse
+        # than an invalidated cache, because nothing announces it.
+        # So the extra claims draw from `random.Random(f"{pid}:extra")`, take
+        # encounters the loop above did not bill, and number on from `n_claims`.
+        # Everything above is byte-identical; only the new ids need drafting.
+        extra_rnd = random.Random(f"{pid}:extra")
+        room = min(len(billable), MAX_CLAIMS_PER_PATIENT) - n_claims
+        n_extra = min(room, extra_rnd.choice(EXTRA_CLAIMS))
+        for j, enc in enumerate(billable[n_claims:n_claims + n_extra]):
+            write_claim(con, extra_rnd, case, enc, n_claims + j)
+            stats["claims"] += 1
+            stats["denials"] += 1
+            stats["extra_claims"] += 1
 
     con.commit()
     stats["drafts_restored"] = restore_drafts(con, drafts_path)
@@ -701,7 +775,7 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
     con.close()
     # the timeline moved with today's date, so the cached prose now cites dates
     # this claim no longer has -- re-point it (textual, no LLM calls)
-    stats["drafts_retimed"] = retime_cached_drafts(db_path, drafts_path)
+    stats["drafts_retimed"], stats["mrns_corrected"] = retime_cached_drafts(db_path, drafts_path)
     return stats
 
 

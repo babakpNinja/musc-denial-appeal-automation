@@ -161,3 +161,71 @@ def test_letter_drafts_survive_a_rebuild(tmp_path):
 
     cached = json.loads(cache.read_text())
     assert live <= set(cached), "every denial needs a cached draft to re-render from"
+
+
+# --- identity a rebuild must not reinvent (#8) -------------------------------
+
+def test_the_mrn_is_the_same_on_every_rebuild():
+    """`hash()` is salted per process, so this used to change on every build.
+
+    Run in child processes: within one interpreter the salt is fixed, so the old
+    `abs(hash(pid))` would have looked perfectly stable here.
+    """
+    import subprocess
+
+    code = ("import sys; sys.path.insert(0, %r); import build_db; "
+            "print(build_db.mrn_for('c-fake-patient-1'))" % str(APP_DIR))
+    seen = {subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, check=True).stdout.strip() for _ in range(3)}
+    assert len(seen) == 1, f"MRN differs between processes: {seen}"
+    assert re.fullmatch(r"MUSC\d{7}", seen.pop())
+
+
+def test_the_mrn_a_letter_cites_is_the_one_on_the_chart():
+    """A letter naming an MRN its patient does not have contradicts the dashboard.
+
+    Not hypothetical: before mrn_for(), a single shipped PDF cited two MRNs, and
+    neither belonged to the patient it was appealing for.
+    """
+    import json
+
+    mrn = {r["patient_id"]: r["mrn"] for r in rows("SELECT patient_id, mrn FROM patients")}
+    owner = {r["denial_id"]: r["patient_id"] for r in rows("SELECT denial_id, patient_id FROM denials")}
+    cache = json.loads(build_db.DRAFTS_PATH.read_text())
+    wrong = {did: sorted(set(re.findall(r"MUSC\d{7}", json.dumps(rec))) - {mrn[owner[did]]})
+             for did, rec in cache.items() if did in owner}
+    assert not {k: v for k, v in wrong.items() if v}, "drafts cite an MRN their patient lacks"
+
+
+def test_no_patient_carries_an_implausible_pile_of_open_denials():
+    counts = [r["n"] for r in rows(
+        "SELECT COUNT(*) n FROM denials GROUP BY patient_id")]
+    assert max(counts) <= build_db.MAX_CLAIMS_PER_PATIENT, (
+        f"a patient has {max(counts)} open denials, which reads as generated")
+
+
+def test_the_queue_is_big_enough_to_be_worth_automating():
+    """The point of the product is volume; a handful of cases undersells it."""
+    n = rows("SELECT COUNT(*) n FROM denials")[0]["n"]
+    assert n >= 80, f"only {n} denials on the board"
+
+
+def test_no_cached_letter_argues_a_claim_that_moved_under_it():
+    """A draft's id staying put does not mean its claim did.
+
+    The cache is keyed by denial id, so a build that reshuffles the draws inside
+    the claim loop hands DEN-MUSC-3CE3-3 a different amount, CPT and denial
+    reason while the cached prose restores, renders and reads perfectly. Proven
+    live: widening `n_claims` by one choice moved 6 drafts onto other claims
+    (billed_amount 1082.64 -> 537.56, carc_code 27 -> 197, ...), which is why
+    extra volume is drawn from `random.Random(f"{pid}:extra")` instead.
+    """
+    import json
+
+    import retime_drafts
+
+    moved = retime_drafts.rewritten_claims(
+        json.loads(build_db.DRAFTS_PATH.read_text()), retime_drafts.current_facts())
+    assert not moved, "cached letters argue claims the database reassigned: " + ", ".join(
+        f"{did} ({', '.join(f'{k} {a} -> {b}' for k, (a, b) in m.items())})"
+        for did, m in list(moved.items())[:3])
