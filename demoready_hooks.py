@@ -1,27 +1,56 @@
 #!/usr/bin/env python3
 """What "safe to show a client" means for the denial-appeal board.
 
-``tools/demoready.py`` already knows the demo is up and rendering. Two things it
+``tools/demoready.py`` already knows the demo is up and rendering. Three things it
 cannot know: whether the queue still has live deadlines (the timeline is
-anchored to build day and decays — see ``refresh_demo.py``), and whether the
-last person to poke at it left cases sitting in "submitted".
+anchored to build day and decays — see ``refresh_demo.py``), whether the last
+person to poke at it left cases sitting in "submitted", and whether the files the
+page hangs off itself actually deployed — ``/assets`` is a separate static mount
+from the page, so the client's own logo can 404 into a broken-image icon at the
+top of their board while every other check here says READY (#106).
 """
 
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 
 import demo_state
+from html_tags import A, IMG, LINK, fetched, tags_in
 from refresh_demo import MAX_LAPSED
 
 TIMEOUT = 30
 READY, STALE, DIRTY, DOWN = "READY", "STALE", "DIRTY", "DOWN"
 
+# What the board is wearing. The logo is the client's own brand on the client's own
+# demo: showing it broken is the embarrassing case, so it is DOWN, while the
+# download-all bundle is a button that fails when pressed — bad, not unshowable.
+LOGO = "/assets/musc-logo-navy.png"
+
+# The page builds its per-case links in JS, so `${...}` is a template, not a URL.
+# Counted and named rather than dropped: a check nobody made reads like one that
+# passed.
+TEMPLATE = "${"
+
 
 def _get(base: str, path: str):
     with urllib.request.urlopen(base.rstrip("/") + path, timeout=TIMEOUT) as resp:
         return json.loads(resp.read())
+
+
+def _status(base: str, path: str) -> int:
+    """The status code for a URL, where a 404 is the answer rather than an error."""
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + path, timeout=TIMEOUT) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _page(base: str) -> str:
+    with urllib.request.urlopen(base.rstrip("/") + "/", timeout=TIMEOUT) as resp:
+        return resp.read().decode("utf-8", "replace")
 
 
 def build_age(base: str) -> int | None:
@@ -72,5 +101,37 @@ def letters(base: str) -> dict:
                        else f"{on_disk} letters on disk")}
 
 
+def assets(base: str) -> dict:
+    """Does everything the board's page hangs off itself actually deploy? (#106)
+
+    ``/assets`` is mounted separately from the page, so the logo can go missing on
+    its own: the board renders, every API answers, and the client's brand is a
+    broken-image icon above their own cases. Nothing else here would notice.
+
+    The per-case PDF links are built in JavaScript from a template, so there is no
+    URL to ask for — those are counted as skipped rather than passed over, because
+    a check nobody made reads exactly like one that passed.
+    """
+    page = _page(base)
+    refs = ([t.get("href", "") for t in tags_in(page, LINK)]
+            + [t.get("src", "") for t in tags_in(page, IMG)]
+            + [t.get("href", "") for t in tags_in(page, A)])
+    templated = sorted({r for r in refs if TEMPLATE in r})
+    wanted = sorted({r for r in refs if fetched(r) and TEMPLATE not in r})
+    missing = [r for r in wanted if _status(base, r) != 200]
+
+    skipped = f"; {len(templated)} link(s) built in JS not checked" if templated else ""
+    if LOGO in missing:
+        return {"name": "assets", "state": DOWN,
+                "detail": f"the MUSC logo is not deployed ({LOGO}) — the client's own brand "
+                          f"renders as a broken image on their board; do not show it"}
+    if missing:
+        return {"name": "assets", "state": DIRTY,
+                "detail": f"linked file(s) missing: {', '.join(missing)} — the board reads "
+                          f"fine, the link fails when pressed"}
+    return {"name": "assets", "state": READY,
+            "detail": f"{len(wanted)} linked file(s) load{skipped}"}
+
+
 def checks(base: str) -> list[dict]:
-    return [freshness(base), letters(base), cleanliness(base)]
+    return [freshness(base), letters(base), assets(base), cleanliness(base)]
