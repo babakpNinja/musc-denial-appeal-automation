@@ -14,7 +14,7 @@ says how many it dropped — see ``prune_letters``.
     python refresh_demo.py                # ship it, but only if the board has aged
     python refresh_demo.py --force --json
 
-Safe to run often: a rebuild rewrites the DB and re-renders all 67 letters (they
+Safe to run often: a rebuild rewrites the DB and re-renders every letter (they
 cite dates), so "files changed" is not the signal — the run only pushes once the
 timeline has drifted ``--min-drift-days`` or more than ``--max-lapsed`` cases have run past
 their deadline. It asks the live ``/api/health`` how old the deployed data is
@@ -139,7 +139,7 @@ def live_build_age(base: str) -> int | None:
     """Days since the *deployed* data was built, straight from /api/health.
 
     The honest measure of drift is a local rebuild, which costs a minute and
-    re-renders 67 letters. This is the same number for free, so it can be asked
+    re-renders every letter. This is the same number for free, so it can be asked
     first and the whole rebuild skipped when the board is obviously fresh.
     None when the deploy is unreachable or predates the ``meta`` table — then
     fall back to rebuilding and measuring.

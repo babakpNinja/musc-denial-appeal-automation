@@ -15,7 +15,7 @@ every case, dollar figure and payer appeal portal behind one dashboard.
 |---|---|
 | **Ingest** | 50 synthetic patients pulled as full FHIR R4 bundles → `data/raw/*.json` |
 | **Model** | Normalized SQLite: patients, conditions, encounters, procedures, observations, medications, coverage, payers, claims, denials, appeals |
-| **Denials** | 67 denials across 12 payers with real X12 CARC/RARC code sets, payer remarks, appeal deadlines and denied amounts |
+| **Denials** | 86 denials across 12 payers with real X12 CARC/RARC code sets, payer remarks, appeal deadlines and denied amounts |
 | **Draft** | One LLM call per case (Claude Sonnet via LiteLLM) grounded *only* in that patient's record — Summary / Clinical Background / Basis for Appeal / Requested Action |
 | **Render** | ReportLab MUSC letterhead PDF: official logo, Charleston address block, claim metadata table, signature block, enclosures |
 | **Serve** | FastAPI dashboard: KPIs, denied-$ per payer, denial reasons, per-case detail, PDF preview + download, bulk ZIP, payer appeal-portal links |

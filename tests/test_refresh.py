@@ -155,7 +155,7 @@ def test_too_many_lapsed_cases_force_a_push_before_the_drift_threshold(rig, monk
 
 
 def test_a_fresh_live_board_is_left_alone_without_paying_for_a_rebuild(rig, monkeypatch):
-    """/api/health already knows the age; rebuilding to learn it costs 67 letters."""
+    """/api/health already knows the age; rebuilding to learn it costs a full re-render."""
     run = rig(drift=6)
     monkeypatch.setattr(rd, "live_build_age", lambda base: 6)
     res = rd.refresh("http://x", "t", dry_run=False, commit=True)

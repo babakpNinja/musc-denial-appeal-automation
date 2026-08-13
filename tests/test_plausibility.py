@@ -229,3 +229,19 @@ def test_no_cached_letter_argues_a_claim_that_moved_under_it():
     assert not moved, "cached letters argue claims the database reassigned: " + ", ".join(
         f"{did} ({', '.join(f'{k} {a} -> {b}' for k, (a, b) in m.items())})"
         for did, m in list(moved.items())[:3])
+
+
+def test_the_readme_quotes_the_board_it_actually_ships():
+    """The one count a client reads before opening the demo.
+
+    Grown 67 -> 86 by #8, and the README still said 67 an hour later; a hand-typed
+    number next to a generated one drifts every single time.
+    """
+    import re
+
+    readme = (build_db.HERE / "README.md").read_text()
+    claimed = re.search(r"\|\s*\*\*Denials\*\*\s*\|\s*(\d+)\s+denials", readme)
+    assert claimed, "README no longer states a denial count in the shape this checks"
+    actual = rows("SELECT COUNT(*) n FROM denials")[0]["n"]
+    assert int(claimed.group(1)) == actual, (
+        f"README advertises {claimed.group(1)} denials, the database has {actual}")
