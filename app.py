@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hmac
 import io
 import os
 import sqlite3
@@ -10,7 +11,7 @@ import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -423,6 +424,82 @@ def set_status(denial_id: str, payload: dict = Body(...)):
         con.close()
     return {**apply_status({"denial_id": denial_id}), "events": status_events(denial_id),
             "next_statuses": list(TRANSITIONS[new]), "durable": is_durable()}
+
+
+def require_demo_admin(token: str | None) -> None:
+    """Gate the one endpoint that can rewrite history.
+
+    The public API only exposes legal forward transitions (``overturned`` is
+    terminal on purpose), so putting the board back after a smoke test needs a
+    door that skips the ladder. It stays locked shut unless ``DEMO_ADMIN_TOKEN``
+    is set on the deployment — with no token configured the endpoint does not
+    exist at all, which is the right answer for a demo anyone can reach.
+    """
+    expected = os.environ.get("DEMO_ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(404, "Not Found")
+    if not token or not hmac.compare_digest(token, expected):
+        raise HTTPException(403, "bad or missing X-Demo-Token")
+
+
+@app.post("/api/workflow/reset")
+def workflow_reset(payload: dict = Body(default={}), x_demo_token: str | None = Header(default=None)):
+    """Clear appeal status (optionally for some cases) and replay a snapshot.
+
+    ``{}``                       -> every case back to ready, timelines wiped
+    ``{"denial_ids": [...]}``    -> only those cases
+    ``{"restore": [rows]}``      -> wipe, then write those rows verbatim, so the
+                                    board matches a snapshot exactly (including
+                                    ``submitted_at`` and each case's events)
+    """
+    require_demo_admin(x_demo_token)
+    ids = payload.get("denial_ids")
+    restore = payload.get("restore") or []
+    if ids is not None and not isinstance(ids, list):
+        raise HTTPException(422, "denial_ids must be a list")
+    if not isinstance(restore, list):
+        raise HTTPException(422, "restore must be a list of status rows")
+
+    known = {r["denial_id"] for r in q("SELECT denial_id FROM denials")}
+    rows = []
+    for row in restore:
+        did = str(row.get("denial_id") or "")
+        status = (row.get("status") or "").strip().lower()
+        if did not in known:
+            raise HTTPException(404, f"unknown case {did or '(missing denial_id)'}")
+        if status not in STATUSES:
+            raise HTTPException(422, f"{did}: status must be one of {', '.join(STATUSES)}")
+        rows.append((did, status, row))
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    con = status_con()
+    try:
+        if ids is None:
+            cleared = con.execute("DELETE FROM appeal_status").rowcount
+            con.execute("DELETE FROM appeal_status_events")
+        else:
+            marks = ",".join("?" * len(ids)) or "NULL"
+            params = tuple(str(i) for i in ids)
+            cleared = con.execute(f"DELETE FROM appeal_status WHERE denial_id IN ({marks})", params).rowcount
+            con.execute(f"DELETE FROM appeal_status_events WHERE denial_id IN ({marks})", params)
+        for did, status, row in rows:
+            con.execute("INSERT INTO appeal_status(denial_id,status,submitted_at,outcome,note,updated_at)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (did, status, row.get("submitted_at"), row.get("outcome") or OUTCOMES.get(status),
+                         row.get("note"), row.get("updated_at") or now))
+            events = row.get("events") or []
+            if not events:  # no timeline in the snapshot: say where this row came from
+                events = [{"from_status": None, "to_status": status, "note": "restored from snapshot", "at": now}]
+            for e in events:
+                con.execute("INSERT INTO appeal_status_events(denial_id,from_status,to_status,note,at)"
+                            " VALUES(?,?,?,?,?)",
+                            (did, e.get("from_status"), e.get("to_status") or status,
+                             e.get("note"), e.get("at") or now))
+        con.commit()
+    finally:
+        con.close()
+    return {"cleared": cleared, "restored": len(rows), "scope": "all" if ids is None else len(ids),
+            "durable": is_durable()}
 
 
 @app.post("/api/cases/{denial_id}/regenerate")
