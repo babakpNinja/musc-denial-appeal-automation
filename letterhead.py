@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
@@ -32,6 +34,27 @@ rl_config.invariant = 1
 
 HERE = Path(__file__).parent
 LOGO = HERE / "assets" / "musc-logo-navy.png"  # white knockout logo re-filled MUSC navy
+# One reader per thread: an ImageReader caches decoded pixel data in itself and
+# generate_letters renders six letters at once, so sharing one across threads
+# corrupts a render now and then.
+_local = threading.local()
+
+
+def _logo() -> ImageReader | None:
+    """The letterhead logo, keyed by its pixels rather than its path.
+
+    ``drawImage`` names the embedded XObject after whatever it is handed: give it
+    a filename and the name is a digest of the *path*, so the same letter built in
+    a different directory (the deploy mirror's temp clone) comes out as different
+    bytes. An ImageReader is digested from the image data, which keeps a render
+    reproducible anywhere.
+    """
+    if not LOGO.exists():
+        return None
+    reader = getattr(_local, "logo", None)
+    if reader is None:
+        reader = _local.logo = ImageReader(str(LOGO))
+    return reader
 
 MUSC_TEAL = colors.HexColor("#00857D")
 MUSC_NAVY = colors.HexColor("#0B2C4A")
@@ -65,10 +88,11 @@ META = ParagraphStyle("musc_meta", parent=BODY, fontSize=9, leading=12, alignmen
 def _header(canvas, doc):
     canvas.saveState()
     w, h = LETTER
-    if LOGO.exists():
+    logo = _logo()
+    if logo is not None:
         lw = 1.75 * inch
         canvas.drawImage(
-            str(LOGO), 0.85 * inch, h - 1.24 * inch, width=lw, height=lw * 784 / 1200,
+            logo, 0.85 * inch, h - 1.24 * inch, width=lw, height=lw * 784 / 1200,
             mask="auto", preserveAspectRatio=True, anchor="sw",
         )
     canvas.setFont("Helvetica", 7.6)
