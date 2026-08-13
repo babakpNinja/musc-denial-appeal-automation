@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -136,3 +137,21 @@ def test_describe_names_the_ids_and_says_nothing_when_clean(artifacts):
 
 def test_the_committed_tree_is_clean():
     assert generate_letters.orphans() == {"pdfs": [], "drafts": []}
+
+
+def cli(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "generate_letters.py", *args],
+                          cwd=APP_DIR, capture_output=True, text=True, timeout=120)
+
+
+def test_the_json_report_is_the_whole_of_stdout():
+    """refresh_demo.py parses this, so prose alongside it would break the caller (#125)."""
+    r = cli("--orphans", "--json")
+    assert r.returncode == 0, r.stderr[-400:]
+    assert json.loads(r.stdout) == {"found": {"pdfs": [], "drafts": []},
+                                    "pruned": {"pdfs": 0, "drafts": 0}}
+
+
+def test_without_json_it_still_reads_like_a_sentence():
+    r = cli("--orphans")
+    assert r.returncode == 0 and r.stdout.strip() == "no orphan letter artifacts"

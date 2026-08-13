@@ -6,7 +6,9 @@ sits a fraction of its payer's appeal window in the past. That keeps ~80% of the
 board appealable on the day it is built — and then quietly decays, because the
 deadlines stay put while today moves. So the data has to be rebuilt now and
 then. Ids are stable across a rebuild, so this is cheap and does not touch the
-letter cache (no model spend) or orphan the live appeal status.
+letter cache (no model spend) or orphan the live appeal status. When they are *not*
+stable, the run prunes the letters the old ids left behind before re-rendering, and
+says how many it dropped — see ``prune_letters``.
 
     python refresh_demo.py --dry-run      # rebuild locally, test, report, revert
     python refresh_demo.py                # ship it, but only if the board has aged
@@ -79,7 +81,38 @@ def git_changes() -> list[str]:
 
 
 def revert_rebuild() -> None:
+    """Put the tree back — letters included, which git cannot do (#125).
+
+    ``git checkout`` restores SHIPPED, but the PDFs are untracked artifacts and the
+    prune deleted some of them for real, so a plain revert leaves letters that belong
+    to the abandoned build: exactly the orphans the suite now fails on, one run later.
+    Re-align them with the restored inputs instead — drop what the reverted board does
+    not have, then re-render from the restored drafts (~5s, no model calls).
+    """
     run(["git", "checkout", "--"] + [str(HERE / p) for p in SHIPPED], cwd=REPO)
+    run([sys.executable, "generate_letters.py", "--prune-orphans", "--json"])
+    run([sys.executable, "generate_letters.py", "--rerender"])
+
+
+def prune_letters() -> dict:
+    """Drop letter artifacts whose denial id this rebuild no longer has (#125).
+
+    A rebuild that renumbers ids leaves the previous board's PDFs and cached drafts
+    behind, and the suite fails on them — so without this the run would revert and
+    repeat every night, logging only "tests failed". This is the one place where the
+    removal is unambiguous: the ids were rewritten a moment ago, and the ``--rerender``
+    that follows re-creates a letter for every case that survived. Returns
+    ``{"ok", "pdfs", "drafts"}``; a report it cannot parse is a failure, not a zero.
+    """
+    res = run([sys.executable, "generate_letters.py", "--prune-orphans", "--json"])
+    if res.returncode != 0:
+        return {"ok": False, "note": f"prune failed: {(res.stderr or res.stdout).strip()[-300:]}"}
+    try:
+        pruned = (json.loads(res.stdout) or {})["pruned"]
+    except (ValueError, KeyError, TypeError):
+        return {"ok": False,
+                "note": f"prune produced no report: {(res.stdout or res.stderr).strip()[-200:]}"}
+    return {"ok": True, "pdfs": pruned.get("pdfs", 0), "drafts": pruned.get("drafts", 0)}
 
 
 def deadlines(db_path: Path = DB) -> dict[str, str]:
@@ -180,6 +213,13 @@ def refresh(base: str, token: str, dry_run: bool, commit: bool,
         return {**out, "ok": False, "error": f"build_db failed: {build.stderr.strip()[-400:]}"}
     print(build.stdout.strip()[-300:], flush=True)
 
+    # before the rerender, not after: a rerender re-creates a PDF from every cached
+    # draft, orphans included, so the stale drafts have to go while the ids are fresh.
+    out["pruned"] = pruned = prune_letters()
+    if not pruned["ok"]:
+        revert_rebuild()
+        return {**out, "ok": False, "error": pruned["note"]}
+
     letters = run([sys.executable, "generate_letters.py", "--rerender"])
     if letters.returncode != 0:
         revert_rebuild()
@@ -247,15 +287,24 @@ def rollback_hint(commit: str | None) -> str:
             f"python tools/mirror.py push musc-appeals -m 'revert refresh {ref}'")
 
 
+def describe_pruned(res: dict) -> str:
+    """What the rebuild deleted. Silent when it deleted nothing — but never implicit."""
+    p = res.get("pruned") or {}
+    if not (p.get("pdfs") or p.get("drafts")):
+        return ""
+    return f"; dropped {p['pdfs']} orphan letter(s) and {p['drafts']} stale draft(s)"
+
+
 def summarise(res: dict) -> str:
     b, a = res.get("before"), res.get("after")
     if not res.get("ok"):
         return f"refresh FAILED: {res.get('error', 'unknown')}"
     if not res.get("pushed"):
-        return f"{res.get('note', 'nothing to do')} ({b['appealable']}/{b['denials']} appealable)"
+        return (f"{res.get('note', 'nothing to do')} ({b['appealable']}/{b['denials']} appealable)"
+                f"{describe_pruned(res)}")
     return (f"demo timeline refreshed and verified live: {a['appealable']}/{a['denials']} appealable "
             f"(was {b['appealable']}), {a['due_soon']} due within 14 days, {a['lapsed']} lapsed; "
-            f"{res['restored']} in-flight appeal(s) preserved")
+            f"{res['restored']} in-flight appeal(s) preserved{describe_pruned(res)}")
 
 
 def main(argv: list[str] | None = None) -> int:

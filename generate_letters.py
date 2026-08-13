@@ -371,6 +371,8 @@ def main() -> int:
                     help="report letter artifacts whose denial id is gone, and exit")
     ap.add_argument("--prune-orphans", action="store_true",
                     help="delete those artifacts (never happens implicitly)")
+    ap.add_argument("--json", action="store_true",
+                    help="with --orphans/--prune-orphans: what was found and removed, for callers")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--denial")
     ap.add_argument("--workers", type=int, default=6)
@@ -379,10 +381,16 @@ def main() -> int:
 
     if args.orphans or args.prune_orphans:
         found = orphans()
-        print(describe_orphans(found) or "no orphan letter artifacts")
+        pruned = {"pdfs": 0, "drafts": 0}
         if args.prune_orphans and (found["pdfs"] or found["drafts"]):
-            n = prune_orphans(found)
-            print(f"pruned {n['pdfs']} pdf(s), {n['drafts']} draft(s)")
+            pruned = prune_orphans(found)
+        # --json is the whole of stdout so a caller can parse it (refresh_demo, #125).
+        if args.json:
+            print(json.dumps({"found": found, "pruned": pruned}, sort_keys=True))
+        else:
+            print(describe_orphans(found) or "no orphan letter artifacts")
+            if pruned["pdfs"] or pruned["drafts"]:
+                print(f"pruned {pruned['pdfs']} pdf(s), {pruned['drafts']} draft(s)")
         return 0
 
     con = connect()

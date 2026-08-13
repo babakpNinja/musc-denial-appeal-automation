@@ -210,7 +210,14 @@ python generate_letters.py --prune-orphans   # delete exactly those
 ```
 
 Pruning the PDF alone is half a fix: the orphan *draft* is what re-renders it on the next
-`--rerender`, so both stores are reported and pruned together.
+`--rerender`, so both stores are reported and pruned together. `--json` prints the whole report
+(`{"found": …, "pruned": …}`) and nothing else, because `refresh_demo.py` parses it.
+
+The one place the removal happens without being typed is *inside* a rebuild (#125): `refresh_demo.py`
+prunes between `build_db.py` and the `--rerender`, where the ids were rewritten a moment ago, and
+names the counts in its report — `dropped 4 orphan letter(s) and 4 stale draft(s)`. Without it a
+renumbering rebuild would fail its own orphan check, revert, and repeat nightly. A prune whose
+report cannot be parsed is a failed refresh, not a zero.
 
 `demoready_hooks.py` reads that corrected figure rather than the raw count (#122): its `letters`
 check compares `letters_on_disk - orphan_letters` against `denials`, so three leftover PDFs can no
@@ -252,8 +259,10 @@ python refresh_demo.py             # ship it, but only if the board has actually
 python refresh_demo.py --force     # …because it has to be now
 ```
 
-It rebuilds, re-renders the letters from cache (no model spend), runs the suite, and **aborts
-without pushing if anything fails**, reverting the local rebuild. A rebuild rewrites the
+It rebuilds, prunes any letter the new board no longer has, re-renders the letters from cache (no
+model spend), runs the suite, and **aborts without pushing if anything fails**, reverting the local
+rebuild — letters included, since `git checkout` cannot restore untracked PDFs the prune deleted, so
+the revert re-renders them from the restored drafts. A rebuild rewrites the
 whole DB whether or not the board moved, so "the files changed" is not the signal to deploy:
 it ships only once the timeline has drifted 21 days or more than 12 cases have lapsed.
 After pushing it waits for the *new* container to actually serve the new deadlines before
