@@ -32,6 +32,7 @@ retime_drafts.py     re-point cached drafts at the rebuilt timeline (no LLM call
 letterhead.py        MUSC letterhead renderer (ReportLab)
 app.py               FastAPI API + dashboard
 demo_state.py        snapshot / restore / reset the live board's appeal status
+refresh_demo.py      scheduled re-anchor of the timeline: rebuild → test → push → verify
 static/index.html    dashboard UI (no build step, no CDN)
 letters/             one pre-generated PDF per denial
 docs/DATA_TAXONOMY.md  FHIR resources, code systems, denial→argument mapping
@@ -41,6 +42,7 @@ tests/test_plausibility.py  ages, deceased patients, claim timeline, draft cache
 tests/test_batch.py    bulk status changes (incl. partial failure) + payer batches
 tests/test_retime.py   date re-pointing when a rebuild moves the timeline
 tests/test_demo_state.py  the admin reset door and snapshot/restore round-trip
+tests/test_refresh.py     when the scheduled refresh ships and when it stays quiet
 tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
 
@@ -179,6 +181,27 @@ python tests/shots.py http://localhost:8123 _local    # phone / tablet / desktop
 Railway, from this repo's subtree — `Procfile` runs uvicorn on `$PORT`, binding `0.0.0.0`.
 The SQLite DB and all pre-generated PDFs ship in the repo, so a fresh deploy is fully
 populated without any LLM calls at boot.
+
+**Keeping it fresh.** The shipped timeline is anchored to the day it was built, so the live
+board slowly rots — deadlines stand still while today moves. `refresh_demo.py` re-anchors it,
+and a monthly cron (`musc-demo-refresh`, see [`agent-docs/CRON.md`](../../agent-docs/CRON.md))
+runs it unattended:
+
+```bash
+python refresh_demo.py --dry-run   # rebuild, test, report the drift, revert — touches nothing live
+python refresh_demo.py             # ship it, but only if the board has actually aged
+python refresh_demo.py --force     # …because it has to be now
+```
+
+It rebuilds, re-renders the letters from cache (no model spend), runs the suite, and **aborts
+without pushing if anything fails**, reverting the local rebuild. A rebuild rewrites all 67
+letters every time (they quote dates), so "the files changed" is not the signal to deploy:
+it ships only once the timeline has drifted 21 days or more than 12 cases have lapsed.
+After pushing it waits for the *new* container to actually serve the new deadlines before
+touching workflow state — and only replays the snapshot if the deploy lost it. Finally it
+runs `tools/uptime.py musc-appeals` (Chromium render check included) and **fails the run if
+the live board is broken**, quoting the `git revert` + `mirror.py push` that undoes it — an
+unattended push never reports success it did not verify.
 
 ## Guardrails
 
