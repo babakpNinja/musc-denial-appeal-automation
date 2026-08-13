@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import demo_state
@@ -42,7 +43,21 @@ PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
 # expander: `${esc(c.appeal_url||c.portal_url)}` is a payer's own portal, somebody
 # else's deploy, and there is nothing honest to fill it with. Those stay unresolved
 # and are reported as unresolved.
-FILL = {"${c.denial_id}": lambda base: _get(base, "/api/cases?limit=1")[0]["denial_id"]}
+FILL = {
+    "${c.denial_id}": lambda base: _get(base, "/api/cases?limit=1")[0]["denial_id"],
+    # the download button on every batch card, and this app serves it: /letters.zip
+    # ?payer=<id>, reported verbatim by /api/batches. It sat in the "nothing can fill
+    # this" count while something could (#110). The whole href is the placeholder, so
+    # what comes back is a URL rather than a fragment — see instances().
+    "${esc(b.zip_url)}": lambda base: _get(base, "/api/batches")["batches"][0]["zip_url"],
+}
+
+# A 404 on one of these is not one card's button. The id is the only thing that varies
+# down the queue, so a wrong route shape there breaks every row's PDF (#107). The batch
+# bundle is deliberately not in here: each payer card carries its own URL from the API,
+# and the unparameterised /letters.zip is already fetched as a static link, so "the zip
+# route is gone" is covered without calling one broken card unshowable (#110).
+WHOLE_QUEUE = ("${c.denial_id}",)
 
 # Filling a template means asking the live site a question, and it can go wrong two
 # ways that must not print alike (#109). These are the site not answering — the
@@ -60,9 +75,14 @@ def _get(base: str, path: str):
 
 
 def _status(base: str, path: str) -> int:
-    """The status code for a URL, where a 404 is the answer rather than an error."""
+    """The status code for a URL, where a 404 is the answer rather than an error.
+
+    Joined the way a browser would rather than concatenated: an href with no leading
+    slash (``letters.zip``) is legal HTML and pasting it onto the base gives
+    ``https://hostletters.zip``, which 404s as convincingly as a real fault.
+    """
     try:
-        with urllib.request.urlopen(base.rstrip("/") + path, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(urllib.parse.urljoin(base, path), timeout=TIMEOUT) as resp:
             return resp.status
     except urllib.error.HTTPError as e:
         return e.code
@@ -157,6 +177,14 @@ def instances(base: str, templated: list[str]) -> tuple[dict, dict, dict]:
             continue
         if url is None:
             unresolved[t] = "no live value to fill it with"
+        elif not url:
+            # the live value was there and was empty: nothing to ask for, and not
+            # something the board did wrong
+            failed[t] = "the live value is empty, so there is no URL to fetch"
+        elif not fetched(url):
+            # a whole URL can come out of live data (#110), and if it points somewhere
+            # else it is not this deploy's to serve — same rule the static hrefs get
+            unresolved[t] = f"live data resolved it off-site ({url})"
         else:
             urls[t] = url
     return urls, unresolved, failed
@@ -206,7 +234,10 @@ def assets(base: str) -> dict:
     wanted = sorted({r for r in refs if fetched(r) and TEMPLATE not in r})
     missing = [r for r in wanted if _status(base, r) != 200]
     resolved, unresolved, failed = instances(base, templated)
-    broken = sorted(u for u in resolved.values() if _status(base, u) != 200)
+    # kept as template -> url: which template broke decides the severity, and the url
+    # is what a human pastes into a browser
+    broken = {t: u for t, u in sorted(resolved.items()) if _status(base, u) != 200}
+    queue_broken = [t for t in broken if any(ph in t for ph in WHOLE_QUEUE)]
 
     note = ""
     if resolved:
@@ -220,18 +251,18 @@ def assets(base: str) -> dict:
         return {"name": "assets", "state": DOWN,
                 "detail": f"the MUSC logo is not deployed ({LOGO}) — the client's own brand "
                           f"renders as a broken image on their board; do not show it"}
-    if broken and every_row(base):
+    if queue_broken and every_row(base):
         return {"name": "assets", "state": DOWN,
-                "detail": f"{', '.join(broken)} 404s while the deploy says it has a letter for "
-                          f"every denial — the per-case link shape is wrong, so the PDF button "
-                          f"on *every* row is broken; do not show it"}
+                "detail": f"{', '.join(broken[t] for t in queue_broken)} 404s while the deploy "
+                          f"says it has a letter for every denial — the per-case link shape is "
+                          f"wrong, so the PDF button on *every* row is broken; do not show it"}
     if missing or broken or failed:
         # both facts, kept apart: one is about the board, the other about this check,
         # and a human acts on them differently
         parts = []
         if missing or broken:
-            parts.append(f"linked file(s) missing: {', '.join(missing + broken)} — the board "
-                         f"reads fine, the link fails when pressed")
+            parts.append(f"linked file(s) missing: {', '.join(missing + list(broken.values()))}"
+                         f" — the board reads fine, the link fails when pressed")
         if failed:
             parts.append(f"this check could not run for {len(failed)} JS link(s) — fix the "
                          f"check, not the board: "
