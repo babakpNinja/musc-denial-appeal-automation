@@ -15,7 +15,8 @@ letter cache (no model spend) or orphan the live appeal status.
 Safe to run often: a rebuild always rewrites all 67 letters (they cite dates),
 so "files changed" is not the signal — the run only pushes once the timeline has
 drifted ``--min-drift-days`` or more than ``--max-lapsed`` cases have run past
-their deadline. Any failing test aborts before anything is pushed. After the
+their deadline. It asks the live ``/api/health`` how old the deployed data is
+before rebuilding anything, so a fresh board costs one request, not a rebuild. Any failing test aborts before anything is pushed. After the
 push it waits until the *new* container actually serves the new timeline before
 touching workflow state, because writes to the old one are about to be thrown
 away.

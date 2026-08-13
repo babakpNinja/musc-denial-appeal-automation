@@ -83,6 +83,12 @@ quotes — in every format the letters use — so a rebuilt demo never argues ab
 no longer has. `build_db.py` runs it automatically; run it by hand with `--apply` after any
 manual date surgery. It is pure text substitution: no model calls, no re-drafting.
 
+Because the whole board hangs off build day, `build_db.py` records that day in a `meta` table and
+`/api/health` serves it as `built_at` / `built_days_ago`. That is how `tools/demoready.py` can say
+"data built 34d ago" and how `refresh_demo.py` decides whether a rebuild is worth running at all —
+without rebuilding to find out. A DB built before this existed reports nulls; stamp it with
+`python build_db.py --stamp YYYY-MM-DD`.
+
 ### Who gets billed
 
 The 50 FHIR patients are all kept as clinical records, but only the 35 who could plausibly
@@ -97,7 +103,7 @@ with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, ins
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health` | counts + letters on disk |
+| `GET /api/health` | counts, letters on disk, and `built_at` / `built_days_ago` — how old the deployed board is |
 | `GET /api/stats` | KPIs, per-payer, per-reason, per-CARC, per-month aggregates |
 | `GET /api/cases?payer=&category=&search=` | filtered case list |
 | `GET /api/cases/{denial_id}` | full case: denial, claim, coverage, clinical context, letter text |
