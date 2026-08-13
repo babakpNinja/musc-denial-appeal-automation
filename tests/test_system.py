@@ -130,6 +130,11 @@ def test_health():
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
     assert body["letters_on_disk"] >= body["denials"]
+    # >= let a PDF for a deleted case pad the count forever; the mismatch is the
+    # thing worth reporting, so the count has to be exactly the live cases (#118).
+    assert (body["orphan_letters"], body["orphan_letter_ids"]) == (0, []), (
+        "letter PDFs on disk for cases that are no longer in denials — "
+        "generate_letters.py --prune-orphans")
 
 
 def test_health_says_how_old_the_shipped_data_is():

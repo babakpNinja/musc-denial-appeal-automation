@@ -123,13 +123,13 @@ with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, ins
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health` | counts, letters on disk, `built_at` / `built_days_ago` (how old the deployed board is) and `revision` (the commit actually serving) |
+| `GET /api/health` | counts, `letters_on_disk` plus `orphan_letters`/`orphan_letter_ids` (PDFs with no case), `built_at` / `built_days_ago` (how old the deployed board is) and `revision` (the commit actually serving) |
 | `GET /api/stats` | KPIs, per-payer, per-reason, per-CARC, per-month aggregates |
 | `GET /api/cases?payer=&category=&search=` | filtered case list |
 | `GET /api/cases/{denial_id}` | full case: denial, claim, coverage, clinical context, letter text |
 | `GET /api/payers` | payers with denial counts, $ and appeal-portal URLs |
 | `GET /api/batches` | outstanding appeals grouped per payer: counts, $, soonest deadline, due-soon/overdue, portal + ZIP links |
-| `GET /letters/{denial_id}.pdf?download=1` | one appeal letter |
+| `GET /letters/{denial_id}.pdf?download=1` | one appeal letter (404 unless the id is still in `denials`) |
 | `GET /letters.zip?payer=` | bulk download |
 | `POST /api/cases/{denial_id}/regenerate` | re-draft a single letter |
 | `GET /api/workflow` | statuses, legal transitions, where status is stored and whether it is durable, and `orphans`/`orphan_ids` — workflow rows whose case no longer exists |
@@ -193,6 +193,24 @@ rebuild that renumbers denial ids can leave status rows behind. They render nowh
 path joins against `denials`), which is exactly why they need counting: `show` and `GET
 /api/workflow` report `orphans`, and `prune` deletes them. `prune` cannot touch a live case; the
 ids it deletes are by definition the ones `denials` does not contain.
+
+**Orphaned letters.** Same shape, one store over: the PDFs in `letters/` and their cached prose in
+`data/letter_drafts.json` are keyed by denial id with nothing enforcing it, and `tools/mirror.py`
+deliberately *keeps* `letters/*.pdf` in the deploy repo across ships — so a left-behind letter
+would be served forever and would pad `letters_on_disk`, the number a reader compares against
+`denials` to conclude every case has a letter. So the mismatch is what gets reported, not the
+count: `/api/health` carries `orphan_letters`/`orphan_letter_ids`, `/letters/{id}.pdf` 404s for an
+id `denials` does not have, and a `generate_letters.py` run names any it finds. Removal is always
+explicit — nothing deletes on boot or during a deploy, because a deploy that quietly tidies files
+makes the keep-rule unprovable:
+
+```bash
+python generate_letters.py --orphans         # report PDFs and drafts with no case
+python generate_letters.py --prune-orphans   # delete exactly those
+```
+
+Pruning the PDF alone is half a fix: the orphan *draft* is what re-renders it on the next
+`--rerender`, so both stores are reported and pruned together.
 
 Railway's filesystem is ephemeral, so without a mounted volume the dashboard shows a **Demo mode**
 banner and `/api/workflow` reports `durable: false` — the workflow is deliberately explicit about

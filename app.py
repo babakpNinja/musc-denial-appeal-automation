@@ -163,12 +163,29 @@ def revision() -> str | None:
     return os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("DEPLOY_REVISION")
 
 
+def orphan_letters() -> list[str]:
+    """Letter PDFs on disk whose case is not in ``denials`` (#118).
+
+    The same shape as ``orphan_ids()`` one store over: the PDFs are per-denial
+    artifacts kept *outside* the database (rendered by `generate_letters.py`, and
+    deliberately preserved across deploys by `mirror`'s `keep: letters/*.pdf`), so
+    a rebuild that renumbers denial ids leaves files nobody links. `/letters/{id}.pdf`
+    still serves them — the route reads the file, it does not join `denials` — and
+    they inflate `letters_on_disk`, which is the number a reader compares against
+    `denials` to conclude "every case has a letter".
+    """
+    known = {r["denial_id"] for r in q("SELECT denial_id FROM denials")}
+    return sorted(p.stem for p in LETTERS.glob("DEN-*.pdf") if p.stem not in known)
+
+
 @app.get("/api/health")
 def health():
     n = one("SELECT (SELECT COUNT(*) FROM patients) patients, (SELECT COUNT(*) FROM denials) denials,"
             " (SELECT COUNT(*) FROM appeals) appeals")
+    orphans = orphan_letters()
     return {"status": "ok", **n, **build_info(), "revision": revision(),
-            "letters_on_disk": len(list(LETTERS.glob("DEN-*.pdf")))}
+            "letters_on_disk": len(list(LETTERS.glob("DEN-*.pdf"))),
+            "orphan_letters": len(orphans), "orphan_letter_ids": orphans[:10]}
 
 
 @app.get("/api/stats")
@@ -318,6 +335,11 @@ def letter(denial_id: str, download: int = 0):
     path = LETTERS / f"{denial_id}.pdf"
     if not path.exists():
         raise HTTPException(404, "letter not generated")
+    # The file existing is not enough: a PDF left behind by a rebuild belongs to a
+    # case that is no longer on the board, so serving it hands out a letter nothing
+    # links to and nothing can explain (#118).
+    if not one("SELECT COUNT(*) n FROM denials WHERE denial_id=?", (denial_id,))["n"]:
+        raise HTTPException(404, "no such denial")
     return FileResponse(path, media_type="application/pdf",
                         filename=f"MUSC-Appeal-{denial_id}.pdf" if download else None,
                         headers={} if download else {"Content-Disposition": f'inline; filename="{denial_id}.pdf"'})

@@ -34,6 +34,7 @@ from letterhead import render_letter  # noqa: E402
 HERE = Path(__file__).parent
 DB = HERE / "data" / "musc_appeals.db"
 LETTERS = HERE / "letters"
+DRAFTS_PATH = HERE / "data" / "letter_drafts.json"  # build_db.DRAFTS_PATH
 MODEL = "claude-sonnet"
 
 PAYER_ADDRESSES = {
@@ -318,16 +319,71 @@ def generate_one(denial_id: str, *, force: bool = False, model: str = MODEL,
         con.close()
 
 
+def orphans(db_path: Path = DB, letters: Path = LETTERS,
+            drafts_path: Path = DRAFTS_PATH) -> dict[str, list[str]]:
+    """Letter artifacts for denial ids this build no longer has (#118).
+
+    Two stores, neither of which the database can enforce: the rendered PDFs, and
+    the draft cache a rebuild restores from. `restore_drafts` already skips a draft
+    whose denial is gone, but `dump_drafts` writes the whole `appeals` table back
+    out, so the cache keeps the entry — and `mirror`'s `keep: letters/*.pdf` keeps
+    the PDF in the deploy repo forever.
+    """
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        known = {r[0] for r in con.execute("SELECT denial_id FROM denials")}
+    finally:
+        con.close()
+    cache = json.loads(drafts_path.read_text()) if drafts_path.exists() else {}
+    return {"pdfs": sorted(p.stem for p in letters.glob("DEN-*.pdf") if p.stem not in known),
+            "drafts": sorted(did for did in cache if did not in known)}
+
+
+def prune_orphans(found: dict[str, list[str]], letters: Path = LETTERS,
+                  drafts_path: Path = DRAFTS_PATH) -> dict[str, int]:
+    """Delete what ``orphans`` found. Only ever on request — never on boot or deploy.
+
+    A deploy that quietly removes files makes `mirror`'s keep-rule unprovable: the
+    next missing letter looks like the same routine tidy-up.
+    """
+    for did in found["pdfs"]:
+        (letters / f"{did}.pdf").unlink(missing_ok=True)
+    if found["drafts"]:
+        cache = json.loads(drafts_path.read_text())
+        for did in found["drafts"]:
+            cache.pop(did, None)
+        drafts_path.write_text(json.dumps(cache, indent=1, sort_keys=True))
+    return {"pdfs": len(found["pdfs"]), "drafts": len(found["drafts"])}
+
+
+def describe_orphans(found: dict[str, list[str]]) -> str:
+    parts = [f"{len(v)} orphan {k} ({', '.join(v[:5])}{'…' if len(v) > 5 else ''})"
+             for k, v in found.items() if v]
+    return "; ".join(parts)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--rerender", action="store_true",
                     help="rebuild PDFs from the stored drafts (no LLM calls)")
+    ap.add_argument("--orphans", action="store_true",
+                    help="report letter artifacts whose denial id is gone, and exit")
+    ap.add_argument("--prune-orphans", action="store_true",
+                    help="delete those artifacts (never happens implicitly)")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--denial")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--model", default=MODEL)
     args = ap.parse_args()
+
+    if args.orphans or args.prune_orphans:
+        found = orphans()
+        print(describe_orphans(found) or "no orphan letter artifacts")
+        if args.prune_orphans and (found["pdfs"] or found["drafts"]):
+            n = prune_orphans(found)
+            print(f"pruned {n['pdfs']} pdf(s), {n['drafts']} draft(s)")
+        return 0
 
     con = connect()
     if args.denial:
@@ -359,6 +415,11 @@ def main() -> int:
     print(f"\ndone: {ok} ok, {fail} failed")
     for e in errors:
         print("  !", e["denial_id"], e["error"])
+    # A rerender is what re-creates an orphan PDF from an orphan draft, so say so
+    # here — but never delete: --prune-orphans is the only way out (#118).
+    left = describe_orphans(orphans())
+    if left:
+        print(f"  ! {left} — run --prune-orphans to remove")
     return 1 if fail else 0
 
 
