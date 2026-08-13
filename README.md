@@ -200,9 +200,9 @@ deliberately *keeps* `letters/*.pdf` in the deploy repo across ships — so a le
 would be served forever and would pad `letters_on_disk`, the number a reader compares against
 `denials` to conclude every case has a letter. So the mismatch is what gets reported, not the
 count: `/api/health` carries `orphan_letters`/`orphan_letter_ids`, `/letters/{id}.pdf` 404s for an
-id `denials` does not have, and a `generate_letters.py` run names any it finds. Removal is always
-explicit — nothing deletes on boot or during a deploy, because a deploy that quietly tidies files
-makes the keep-rule unprovable:
+id `denials` does not have, and a `generate_letters.py` run names any it finds. Nothing deletes on
+boot, and no deletion is ever silent — a deploy that quietly tidied files would make the keep-rule
+unprovable:
 
 ```bash
 python generate_letters.py --orphans         # report PDFs and drafts with no case
@@ -213,11 +213,18 @@ Pruning the PDF alone is half a fix: the orphan *draft* is what re-renders it on
 `--rerender`, so both stores are reported and pruned together. `--json` prints the whole report
 (`{"found": …, "pruned": …}`) and nothing else, because `refresh_demo.py` parses it.
 
-The one place the removal happens without being typed is *inside* a rebuild (#125): `refresh_demo.py`
-prunes between `build_db.py` and the `--rerender`, where the ids were rewritten a moment ago, and
-names the counts in its report — `dropped 4 orphan letter(s) and 4 stale draft(s)`. Without it a
-renumbering rebuild would fail its own orphan check, revert, and repeat nightly. A prune whose
-report cannot be parsed is a failed refresh, not a zero.
+It also runs in two places where nobody types it, because the leftovers appear there and the
+deletion is unambiguous:
+
+- **inside a rebuild** (#125) — `refresh_demo.py` prunes between `build_db.py` and the `--rerender`,
+  where the ids were rewritten a moment ago, and names the counts in its report: `dropped 4 orphan
+  letter(s) and 4 stale draft(s)`. Without it a renumbering rebuild would fail its own orphan check,
+  revert, and repeat nightly. A prune whose report cannot be parsed is a failed refresh, not a zero.
+- **inside the staged clone** (#126) — the deploy repo's copies are the ones the local prune cannot
+  reach (`keep: letters/*.pdf` protects them from the sync), so the mirror's `prepare` step prunes
+  before it re-renders. That is a deletion from a repo the client can read, so it is announced twice:
+  `mirror.py` prints `! this push removes N file(s) … deleted by prepare`, and the mirror commit
+  names the files in its body, which puts the removal in that repo's own history.
 
 `demoready_hooks.py` reads that corrected figure rather than the raw count (#122): its `letters`
 check compares `letters_on_disk - orphan_letters` against `denials`, so three leftover PDFs can no
