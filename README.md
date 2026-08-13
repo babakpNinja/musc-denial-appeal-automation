@@ -31,6 +31,7 @@ generate_letters.py  DB → LLM draft → MUSC PDF → appeals table
 retime_drafts.py     re-point cached drafts at the rebuilt timeline (no LLM calls)
 letterhead.py        MUSC letterhead renderer (ReportLab)
 app.py               FastAPI API + dashboard
+demo_state.py        snapshot / restore / reset the live board's appeal status
 static/index.html    dashboard UI (no build step, no CDN)
 letters/             one pre-generated PDF per denial
 docs/DATA_TAXONOMY.md  FHIR resources, code systems, denial→argument mapping
@@ -39,6 +40,7 @@ tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
 tests/test_plausibility.py  ages, deceased patients, claim timeline, draft cache
 tests/test_batch.py    bulk status changes (incl. partial failure) + payer batches
 tests/test_retime.py   date re-pointing when a rebuild moves the timeline
+tests/test_demo_state.py  the admin reset door and snapshot/restore round-trip
 tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
 
@@ -106,6 +108,7 @@ with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, ins
 | `GET /api/cases/{denial_id}/status` | current status + event history |
 | `POST /api/cases/{denial_id}/status` | `{"status": "submitted", "note": "faxed, ref 8821"}` — 409 on an illegal transition |
 | `POST /api/cases/status/bulk` | `{"denial_ids": [...], "status": "submitted", "note": "..."}` — per-case `ok`/`error`, max 500 |
+| `POST /api/workflow/reset` | admin-only: wipe status and optionally replay a snapshot (404 unless `DEMO_ADMIN_TOKEN` is set) |
 
 ## Appeal lifecycle
 
@@ -136,6 +139,24 @@ so lifecycle writes go to a separate `appeal_status.db`:
 | `RAILWAY_VOLUME_MOUNT_PATH` set | `$RAILWAY_VOLUME_MOUNT_PATH/appeal_status.db` | yes — survives redeploys |
 | otherwise | `data/appeal_status.db` (container disk) | no — resets on redeploy |
 | `APPEAL_STATUS_DB` | explicit path (used by tests) | depends |
+
+**Putting the board back.** Because live status is durable, smoke-testing a deploy moves *real*
+cases, and the public API cannot undo it — `overturned` is terminal on purpose. `demo_state.py`
+is the safe way in and out:
+
+```bash
+python demo_state.py show     --base https://…                      # what is non-ready right now
+python demo_state.py snapshot --base https://… -o data/demo_state.json
+python demo_state.py restore  --base https://… -i data/demo_state.json   # replay it exactly
+python demo_state.py reset    --base https://…                      # everything back to ready
+```
+
+`snapshot`/`show` are read-only; `restore`/`reset` go through `POST /api/workflow/reset`, which
+**does not exist** unless the deployment sets `DEMO_ADMIN_TOKEN` (an unset token means 404, a wrong
+one means 403). Pass the same value with `--token` or in the environment. A snapshot only carries
+the cases that moved — it is a diff against a fresh board — and restore replays `submitted_at`,
+the note and the whole event timeline verbatim, so the board ends up as found rather than with a
+stray "withdrawn" entry in a case's history.
 
 Railway's filesystem is ephemeral, so without a mounted volume the dashboard shows a **Demo mode**
 banner and `/api/workflow` reports `durable: false` — the workflow is deliberately explicit about
