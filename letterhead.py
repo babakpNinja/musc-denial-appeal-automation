@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from reportlab import rl_config
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import LETTER
@@ -22,6 +23,12 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+
+# Without this every render stamps a fresh /CreationDate and document /ID, so 67
+# identical letters come out as 67 changed files — 5.8 MB of git churn that says
+# nothing about the letters. Invariant makes the bytes a function of the content,
+# which is what lets the deploy mirror tell a real change from a re-render.
+rl_config.invariant = 1
 
 HERE = Path(__file__).parent
 LOGO = HERE / "assets" / "musc-logo-navy.png"  # white knockout logo re-filled MUSC navy

@@ -3,5 +3,10 @@ __pycache__/
 data/musc_appeals.db-wal
 data/musc_appeals.db-shm
 letters/_*.png
+# The 67 letter PDFs are 100% derivable from data/letter_drafts.json + the DB
+# (`python generate_letters.py --rerender`, ~6s, no model calls). Tracking them
+# put 5.8 MB into this repo's history every time the timeline was rebuilt, so
+# the deploy mirror renders them at push time instead — see tools/mirror.py.
+letters/*.pdf
 .pytest_cache/
 data/appeal_status.db*

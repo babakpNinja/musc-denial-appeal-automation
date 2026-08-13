@@ -296,6 +296,12 @@ def generate_one(denial_id: str, *, force: bool = False, model: str = MODEL,
         if pdf.stat().st_size < 4000:
             raise RuntimeError(f"suspiciously small PDF for {denial_id}")
 
+        if rerender_only:
+            # Nothing was drafted, so nothing about the appeal changed: rewriting
+            # the row would only move `generated_at` and dirty a 1.6 MB DB. The
+            # prose itself is kept current by retime_drafts after a rebuild.
+            return {"denial_id": denial_id, "status": "rerendered", "bytes": pdf.stat().st_size}
+
         con.execute("DELETE FROM appeals WHERE denial_id=?", (denial_id,))
         con.execute(
             "INSERT INTO appeals (appeal_id, denial_id, patient_id, payer_id, status, letter_path,"

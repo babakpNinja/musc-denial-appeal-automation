@@ -34,7 +34,7 @@ app.py               FastAPI API + dashboard
 demo_state.py        snapshot / restore / reset the live board's appeal status
 refresh_demo.py      scheduled re-anchor of the timeline: rebuild → test → push → verify
 static/index.html    dashboard UI (no build step, no CDN)
-letters/             one pre-generated PDF per denial
+letters/             one PDF per denial — untracked build artifact, see below
 docs/DATA_TAXONOMY.md  FHIR resources, code systems, denial→argument mapping
 tests/test_system.py   end-to-end checks (DB, every PDF, API, UI)
 tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
@@ -67,6 +67,20 @@ python -m pytest tests -q
 persisted to `appeals.sections_json` so a redeploy or a letterhead tweak never re-bills the model.
 `build_db.py` drops the database when it rebuilds, so it exports those drafts to
 `data/letter_drafts.json` first and restores them afterwards — rebuilding is free.
+
+### The letters are built, not committed
+
+`letters/*.pdf` is gitignored. The PDFs are 5.8 MB derived entirely from the committed
+drafts, and every timeline rebuild rewrote all 67 of them — the repo was gaining a
+release's worth of binaries per refresh for no reviewable change. Instead:
+
+- rendering is deterministic (`rl_config.invariant` in `letterhead.py`), so the same
+  drafts always produce the same bytes and a real change is visible as one;
+- `tools/mirror.py` runs `generate_letters.py --rerender` as its `prepare` step inside
+  the staged clone, so the *deploy* repo still carries the PDFs and the container serves
+  `/letters/<id>.pdf` on its first request — no render at start-up;
+- a fresh checkout has no letters, so `tests/conftest.py` renders them once per session
+  (~6 s, no model calls) and the suite still checks every one.
 
 ### Why the timeline moves but the ids don't
 
@@ -200,8 +214,8 @@ python refresh_demo.py --force     # …because it has to be now
 ```
 
 It rebuilds, re-renders the letters from cache (no model spend), runs the suite, and **aborts
-without pushing if anything fails**, reverting the local rebuild. A rebuild rewrites all 67
-letters every time (they quote dates), so "the files changed" is not the signal to deploy:
+without pushing if anything fails**, reverting the local rebuild. A rebuild rewrites the
+whole DB whether or not the board moved, so "the files changed" is not the signal to deploy:
 it ships only once the timeline has drifted 21 days or more than 12 cases have lapsed.
 After pushing it waits for the *new* container to actually serve the new deadlines before
 touching workflow state — and only replays the snapshot if the deploy lost it. Finally it

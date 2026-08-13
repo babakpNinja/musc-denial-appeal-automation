@@ -12,9 +12,9 @@ letter cache (no model spend) or orphan the live appeal status.
     python refresh_demo.py                # ship it, but only if the board has aged
     python refresh_demo.py --force --json
 
-Safe to run often: a rebuild always rewrites all 67 letters (they cite dates),
-so "files changed" is not the signal — the run only pushes once the timeline has
-drifted ``--min-drift-days`` or more than ``--max-lapsed`` cases have run past
+Safe to run often: a rebuild rewrites the DB and re-renders all 67 letters (they
+cite dates), so "files changed" is not the signal — the run only pushes once the
+timeline has drifted ``--min-drift-days`` or more than ``--max-lapsed`` cases have run past
 their deadline. It asks the live ``/api/health`` how old the deployed data is
 before rebuilding anything, so a fresh board costs one request, not a rebuild. Any failing test aborts before anything is pushed. After the
 push it waits until the *new* container actually serves the new timeline before
@@ -41,8 +41,10 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 DB = HERE / "data" / "musc_appeals.db"
 LIVE = "https://musc-appeals-production.up.railway.app"
-# files the deploy actually carries; a rebuild that changes none of them is a no-op
-SHIPPED = ("data/musc_appeals.db", "data/letter_drafts.json", "letters")
+# versioned inputs the deploy is built from; a rebuild that changes none of them is a
+# no-op. The letter PDFs are deliberately absent: they are untracked build artifacts
+# rendered by the mirror's prepare step, so git could neither report nor revert them.
+SHIPPED = ("data/musc_appeals.db", "data/letter_drafts.json")
 MIN_DRIFT_DAYS = 21     # below this the board still looks live; do not churn the deploy
 MAX_LAPSED = 12         # …unless this many cases have already run past their deadline
 UPTIME_TARGET = "musc-appeals"   # the name in tools/uptime_targets.json
@@ -104,7 +106,7 @@ def live_build_age(base: str) -> int | None:
     """Days since the *deployed* data was built, straight from /api/health.
 
     The honest measure of drift is a local rebuild, which costs a minute and
-    rewrites 67 letters. This is the same number for free, so it can be asked
+    re-renders 67 letters. This is the same number for free, so it can be asked
     first and the whole rebuild skipped when the board is obviously fresh.
     None when the deploy is unreachable or predates the ``meta`` table — then
     fall back to rebuilding and measuring.
@@ -191,8 +193,8 @@ def refresh(base: str, token: str, dry_run: bool, commit: bool,
     out["drift_days"] = drift = drift_days(was, deadlines())
     out["changed_files"] = len(git_changes())
 
-    # every rebuild rewrites 67 letters (they cite dates), so "the files changed"
-    # is not a reason to ship — only a board that has visibly aged is.
+    # a rebuild rewrites the whole DB whether or not the board moved, so "the
+    # files changed" is not a reason to ship — only a board that has visibly aged is.
     stale = drift >= min_drift or out["before"]["lapsed"] > max_lapsed
     if dry_run or not stale:
         revert_rebuild()
