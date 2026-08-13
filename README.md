@@ -212,6 +212,13 @@ python generate_letters.py --prune-orphans   # delete exactly those
 Pruning the PDF alone is half a fix: the orphan *draft* is what re-renders it on the next
 `--rerender`, so both stores are reported and pruned together.
 
+`demoready_hooks.py` reads that corrected figure rather than the raw count (#122): its `letters`
+check compares `letters_on_disk - orphan_letters` against `denials`, so three leftover PDFs can no
+longer cancel three letters that never rendered — and the severities stay distinct. A short deploy
+is DOWN (the mirror's `prepare` step did not finish), an orphan on an otherwise complete board is
+DIRTY (every button works, but the number proving it does not mean anything), and a deploy too old
+to report the field says "padding not checked" instead of passing quietly.
+
 Railway's filesystem is ephemeral, so without a mounted volume the dashboard shows a **Demo mode**
 banner and `/api/workflow` reports `durable: false` — the workflow is deliberately explicit about
 this rather than silently losing status. The production service has a volume mounted at `/data`

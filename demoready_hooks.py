@@ -124,21 +124,56 @@ def cleanliness(base: str) -> dict:
                        if snap["cases"] else "every case at ready")}
 
 
+# The deploy repo *keeps* letters/*.pdf across ships (tools/mirror_targets.json), so a
+# rebuild that renumbers denial ids leaves PDFs for cases that are gone. They pad
+# `letters_on_disk`, which is the number this check compares against `denials` — three
+# orphans cancel three letters that never rendered and the comparison passes. The board
+# reports the mismatch itself since #118; a build that predates that field cannot be
+# asked, and says so rather than passing.
+NO_ORPHAN_FIELD = ("padding not checked: this build does not report orphan_letters "
+                   "(pre-#118) — ship the current app to get it")
+
+
+def usable_letters(h: dict) -> tuple[int | None, int | None, int | None]:
+    """``(letters that belong to a live case, denials, orphans)`` out of /api/health.
+
+    ``orphans is None`` means the deploy did not report the field at all, which is not
+    the same as zero and must not read like it.
+    """
+    on_disk, denials = h.get("letters_on_disk"), h.get("denials")
+    orphans = h.get("orphan_letters")
+    usable = on_disk if on_disk is None or orphans is None else on_disk - orphans
+    return usable, denials, orphans
+
+
 def letters(base: str) -> dict:
-    """Every denial must still have a letter to open.
+    """Every denial must still have a letter to open — and no more than that.
 
     The PDFs are no longer committed: the deploy mirror renders them in its
     ``prepare`` step. Uptime opens one of them, which catches "none shipped" but
     not "half shipped", so compare the counts the deploy reports about itself.
+
+    An orphan is a different severity from a short deploy: every row's button still
+    works, so the board is showable (DIRTY) — but the count it uses to prove that has
+    stopped meaning anything, and a rebuild is what created it (#122).
     """
     h = _get(base, "/api/health")
-    on_disk, denials = h.get("letters_on_disk"), h.get("denials")
-    short = on_disk is not None and denials is not None and on_disk < denials
-    return {"name": "letters", "state": DOWN if short else READY,
-            "detail": (f"only {on_disk} of {denials} letters shipped — the mirror's prepare step "
-                       f"(generate_letters.py --rerender) did not finish; re-run "
-                       f"`python tools/mirror.py push musc-appeals`" if short
-                       else f"{on_disk} letters on disk")}
+    usable, denials, orphans = usable_letters(h)
+    short = usable is not None and denials is not None and usable < denials
+    facts = []
+    if short:
+        facts.append(f"only {usable} of {denials} letters shipped — the mirror's prepare step "
+                     f"(generate_letters.py --rerender) did not finish; re-run "
+                     f"`python tools/mirror.py push musc-appeals`")
+    if orphans:
+        ids = ", ".join(h.get("orphan_letter_ids") or []) or "ids not reported"
+        facts.append(f"{orphans} letter(s) on disk for case(s) that no longer exist ({ids}) — "
+                     f"`python generate_letters.py --prune-orphans`, then re-ship")
+    if not facts:
+        facts.append(f"{usable} letters on disk" + ("" if orphans == 0 else f", {NO_ORPHAN_FIELD}"))
+    return {"name": "letters",
+            "state": DOWN if short else (DIRTY if orphans else READY),
+            "detail": "; ".join(facts)}
 
 
 def resolve(base: str, template: str) -> str | None:
@@ -205,13 +240,17 @@ def every_row(base: str) -> bool:
     it holds a letter for every denial and the URL still 404s, the route shape is
     wrong — a rename, a changed query param — and every row's PDF button is broken.
     A genuinely missing file is the ``letters`` check's job, and it says DOWN there.
+
+    Reads the orphan-corrected figure (#122): a leftover PDF for a deleted case pads
+    the raw count, and the padded version of this answer blames the route shape for a
+    letter that simply never rendered.
     """
     try:
         h = _get(base, "/api/health")
     except Exception:
         return False
-    on_disk, denials = h.get("letters_on_disk"), h.get("denials")
-    return on_disk is not None and denials is not None and on_disk >= denials
+    usable, denials, _ = usable_letters(h)
+    return usable is not None and denials is not None and usable >= denials
 
 
 def assets(base: str) -> dict:
