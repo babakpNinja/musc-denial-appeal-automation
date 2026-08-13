@@ -16,7 +16,7 @@ import demo_state
 from refresh_demo import MAX_LAPSED
 
 TIMEOUT = 30
-READY, STALE, DIRTY = "READY", "STALE", "DIRTY"
+READY, STALE, DIRTY, DOWN = "READY", "STALE", "DIRTY", "DOWN"
 
 
 def _get(base: str, path: str):
@@ -55,5 +55,22 @@ def cleanliness(base: str) -> dict:
                        if snap["cases"] else "every case at ready")}
 
 
+def letters(base: str) -> dict:
+    """Every denial must still have a letter to open.
+
+    The PDFs are no longer committed: the deploy mirror renders them in its
+    ``prepare`` step. Uptime opens one of them, which catches "none shipped" but
+    not "half shipped", so compare the counts the deploy reports about itself.
+    """
+    h = _get(base, "/api/health")
+    on_disk, denials = h.get("letters_on_disk"), h.get("denials")
+    short = on_disk is not None and denials is not None and on_disk < denials
+    return {"name": "letters", "state": DOWN if short else READY,
+            "detail": (f"only {on_disk} of {denials} letters shipped — the mirror's prepare step "
+                       f"(generate_letters.py --rerender) did not finish; re-run "
+                       f"`python tools/mirror.py push musc-appeals`" if short
+                       else f"{on_disk} letters on disk")}
+
+
 def checks(base: str) -> list[dict]:
-    return [freshness(base), cleanliness(base)]
+    return [freshness(base), letters(base), cleanliness(base)]
