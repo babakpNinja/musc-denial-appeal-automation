@@ -44,6 +44,15 @@ PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
 # and are reported as unresolved.
 FILL = {"${c.denial_id}": lambda base: _get(base, "/api/cases?limit=1")[0]["denial_id"]}
 
+# Filling a template means asking the live site a question, and it can go wrong two
+# ways that must not print alike (#109). These are the site not answering — the
+# demo's problem, and the link is honestly left unchecked. Everything else (a renamed
+# field, an empty case list, a typo in the lambda above) means *this check* could not
+# do its job, which is never a READY board. HTTPError is a URLError so it comes along;
+# JSONDecodeError is named rather than its parent ValueError, which would also swallow
+# an `int()` on the wrong field and call my bug an outage.
+UNREACHABLE = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
+
 
 def _get(base: str, path: str):
     with urllib.request.urlopen(base.rstrip("/") + path, timeout=TIMEOUT) as resp:
@@ -126,25 +135,31 @@ def resolve(base: str, template: str) -> str | None:
     return url
 
 
-def instances(base: str, templated: list[str]) -> tuple[dict, dict]:
-    """Split the JS-built links into the ones filled from live data and the rest.
+def instances(base: str, templated: list[str]) -> tuple[dict, dict, dict]:
+    """Split the JS-built links three ways: filled, never fillable, and gave up.
 
-    Two dicts, not one number: a link that was resolved and fetched must not read
-    like one nothing was ever asked about. Failing to *read* the live data is its own
-    answer again — the check could not run for that link, which is not a pass.
+    Three dicts, not one number, because they mean different things and only one of
+    them is normal. A link that was resolved and fetched must not read like one
+    nothing was ever asked about; and a template this hook *failed* to fill must not
+    hide among the ones it was never going to fill (#109) — that bucket is expected
+    to be non-empty, which makes it the ideal place for a broken check to sit
+    unnoticed.
     """
-    urls, unresolved = {}, {}
+    urls, unresolved, failed = {}, {}, {}
     for t in templated:
         try:
             url = resolve(base, t)
-        except Exception as e:                  # the API that fills it is unreadable
+        except UNREACHABLE as e:                # the site would not answer: its problem
             unresolved[t] = f"live data unreadable ({type(e).__name__})"
+            continue
+        except Exception as e:                  # this check's problem, and not a pass
+            failed[t] = f"{type(e).__name__}: {e}"
             continue
         if url is None:
             unresolved[t] = "no live value to fill it with"
         else:
             urls[t] = url
-    return urls, unresolved
+    return urls, unresolved, failed
 
 
 def by_reason(unresolved: dict) -> dict:
@@ -190,7 +205,7 @@ def assets(base: str) -> dict:
     templated = sorted({r for r in refs if TEMPLATE in r})
     wanted = sorted({r for r in refs if fetched(r) and TEMPLATE not in r})
     missing = [r for r in wanted if _status(base, r) != 200]
-    resolved, unresolved = instances(base, templated)
+    resolved, unresolved, failed = instances(base, templated)
     broken = sorted(u for u in resolved.values() if _status(base, u) != 200)
 
     note = ""
@@ -210,10 +225,18 @@ def assets(base: str) -> dict:
                 "detail": f"{', '.join(broken)} 404s while the deploy says it has a letter for "
                           f"every denial — the per-case link shape is wrong, so the PDF button "
                           f"on *every* row is broken; do not show it"}
-    if missing or broken:
-        return {"name": "assets", "state": DIRTY,
-                "detail": f"linked file(s) missing: {', '.join(missing + broken)} — the board "
-                          f"reads fine, the link fails when pressed{note}"}
+    if missing or broken or failed:
+        # both facts, kept apart: one is about the board, the other about this check,
+        # and a human acts on them differently
+        parts = []
+        if missing or broken:
+            parts.append(f"linked file(s) missing: {', '.join(missing + broken)} — the board "
+                         f"reads fine, the link fails when pressed")
+        if failed:
+            parts.append(f"this check could not run for {len(failed)} JS link(s) — fix the "
+                         f"check, not the board: "
+                         + "; ".join(f"{t} — {why}" for t, why in sorted(failed.items())))
+        return {"name": "assets", "state": DIRTY, "detail": "; ".join(parts) + note}
     return {"name": "assets", "state": READY,
             "detail": f"{len(wanted)} linked file(s) load{note}"}
 
