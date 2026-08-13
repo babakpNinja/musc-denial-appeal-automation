@@ -24,6 +24,11 @@ def _get(base: str, path: str):
         return json.loads(resp.read())
 
 
+def build_age(base: str) -> int | None:
+    """How many days ago the *deployed* data was built (None if it predates ``meta``)."""
+    return _get(base, "/api/health").get("built_days_ago")
+
+
 def freshness(base: str) -> dict:
     """Read the *live* board's deadlines — the local DB may not be what is deployed."""
     cases = _get(base, "/api/cases?limit=1000")
@@ -31,10 +36,14 @@ def freshness(base: str) -> dict:
     lapsed = sum(1 for d in left if d <= 0)
     appealable = sum(1 for d in left if d > 0)
     stale = lapsed > MAX_LAPSED
+    age = build_age(base)
+    # the age is what a human actually asks ("how old is this thing?"); the
+    # lapsed count is what makes it embarrassing, so that still sets the verdict
+    built = f"data built {age}d ago" if age is not None else "build date unknown"
     return {"name": "timeline", "state": STALE if stale else READY,
-            "detail": (f"{lapsed} of {len(cases)} cases past their deadline — run "
+            "detail": (f"{built}, {lapsed} of {len(cases)} cases past their deadline — run "
                        f"apps/musc-appeal-automation/refresh_demo.py" if stale
-                       else f"{appealable}/{len(cases)} appealable, {lapsed} lapsed")}
+                       else f"{built}, {appealable}/{len(cases)} appealable, {lapsed} lapsed")}
 
 
 def cleanliness(base: str) -> dict:

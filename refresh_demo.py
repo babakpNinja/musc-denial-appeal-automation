@@ -99,6 +99,22 @@ def drift_days(before: dict[str, str], after: dict[str, str]) -> int:
     return moved[len(moved) // 2] if moved else 0
 
 
+def live_build_age(base: str) -> int | None:
+    """Days since the *deployed* data was built, straight from /api/health.
+
+    The honest measure of drift is a local rebuild, which costs a minute and
+    rewrites 67 letters. This is the same number for free, so it can be asked
+    first and the whole rebuild skipped when the board is obviously fresh.
+    None when the deploy is unreachable or predates the ``meta`` table — then
+    fall back to rebuilding and measuring.
+    """
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/api/health", timeout=20) as resp:
+            return (json.loads(resp.read()) or {}).get("built_days_ago")
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError):
+        return None
+
+
 def wait_for_live_data(base: str, denial_id: str, deadline: str, timeout: int = 900) -> bool:
     """Poll until the deployed app serves the rebuilt timeline, not just any 200.
 
@@ -138,6 +154,19 @@ def verify_live(target: str = UPTIME_TARGET) -> tuple[bool, list[str]]:
 def refresh(base: str, token: str, dry_run: bool, commit: bool,
             min_drift: int = MIN_DRIFT_DAYS, max_lapsed: int = MAX_LAPSED) -> dict:
     out: dict = {"before": board_health(), "pushed": False, "restored": 0, "dry_run": dry_run}
+
+    # Cheapest gate first: ask the live app how old its data is. A board that is
+    # young and has few lapsed cases cannot possibly need a push, so do not pay
+    # for a rebuild to find that out. Unknown age (old deploy, or down) falls
+    # through to the rebuild, which measures drift the expensive but sure way.
+    if not dry_run:
+        out["live_build_age"] = age = live_build_age(base)
+        if age is not None and age < min_drift and out["before"]["lapsed"] <= max_lapsed:
+            return {**out, "ok": True, "drift_days": age,
+                    "note": (f"skipped without rebuilding: live data is {age}d old and "
+                             f"{out['before']['lapsed']} case(s) lapsed — pushes at {min_drift}d "
+                             f"or >{max_lapsed} lapsed")}
+
     was = deadlines()
 
     build = run([sys.executable, "build_db.py"])

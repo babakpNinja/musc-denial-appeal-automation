@@ -57,6 +57,9 @@ def rig(monkeypatch):
     run = FakeRun()
     monkeypatch.setattr(rd, "run", run)
     monkeypatch.setattr(rd, "wait_for_live_data", lambda *a, **k: True)
+    # by default the live deploy cannot say how old it is, so every run has to
+    # rebuild to find out — the tests below that care set an age explicitly
+    monkeypatch.setattr(rd, "live_build_age", lambda base: None)
 
     def setup(drift: int, lapsed: int = 5, fail: str | None = None, uptime: str = GREEN):
         run.fail, run.uptime = fail, uptime
@@ -115,6 +118,50 @@ def test_too_many_lapsed_cases_force_a_push_before_the_drift_threshold(rig, monk
     snapshots(monkeypatch, [])
     assert rd.refresh("http://x", "t", dry_run=False, commit=True)["pushed"]
     assert run.ran("mirror.py")
+
+
+def test_a_fresh_live_board_is_left_alone_without_paying_for_a_rebuild(rig, monkeypatch):
+    """/api/health already knows the age; rebuilding to learn it costs 67 letters."""
+    run = rig(drift=6)
+    monkeypatch.setattr(rd, "live_build_age", lambda base: 6)
+    res = rd.refresh("http://x", "t", dry_run=False, commit=True)
+
+    assert res["ok"] and not res["pushed"] and res["live_build_age"] == 6
+    assert "without rebuilding" in res["note"]
+    assert not run.ran("build_db.py") and not run.ran("--rerender") and not run.ran("mirror.py")
+
+
+def test_lapsed_cases_still_force_a_rebuild_however_young_the_build_is(rig, monkeypatch):
+    run = rig(drift=8, lapsed=20)
+    monkeypatch.setattr(rd, "live_build_age", lambda base: 8)
+    snapshots(monkeypatch, [])
+    assert rd.refresh("http://x", "t", dry_run=False, commit=True)["pushed"]
+    assert run.ran("build_db.py")
+
+
+def test_a_deploy_that_cannot_say_its_age_is_measured_the_expensive_way(rig, monkeypatch):
+    """Unknown age must never read as fresh — fall through and rebuild."""
+    run = rig(drift=30)
+    monkeypatch.setattr(rd, "live_build_age", lambda base: None)
+    snapshots(monkeypatch, [])
+    res = rd.refresh("http://x", "t", dry_run=False, commit=True)
+    assert res["pushed"] and res["live_build_age"] is None and run.ran("build_db.py")
+
+
+def test_force_skips_the_cheap_gate_too(rig, monkeypatch):
+    run = rig(drift=1)
+    monkeypatch.setattr(rd, "live_build_age", lambda base: 0)
+    snapshots(monkeypatch, [])
+    assert rd.refresh("http://x", "t", dry_run=False, commit=True, min_drift=0)["pushed"]
+    assert run.ran("build_db.py")
+
+
+def test_a_dry_run_still_rebuilds_because_that_is_what_it_is_for(rig, monkeypatch):
+    run = rig(drift=2)
+    monkeypatch.setattr(rd, "live_build_age", lambda base: 2)
+    res = rd.refresh("http://x", "", dry_run=True, commit=True)
+    assert res["ok"] and "dry run" in res["note"]
+    assert run.ran("build_db.py") and run.ran("pytest") and not run.ran("mirror.py")
 
 
 def test_a_failing_test_aborts_before_anything_is_pushed(rig):

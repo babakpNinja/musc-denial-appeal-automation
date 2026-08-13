@@ -132,6 +132,14 @@ def test_health():
     assert body["letters_on_disk"] >= body["denials"]
 
 
+def test_health_says_how_old_the_shipped_data_is():
+    """The deployed board has to be able to answer "how old are you?" itself —
+    otherwise the only way to know is to rebuild it locally and diff."""
+    body = client.get("/api/health").json()
+    assert body["built_at"], "shipped DB has no meta.built_at — run build_db.py --stamp"
+    assert body["built_days_ago"] >= 0
+
+
 def test_index_renders():
     r = client.get("/")
     assert r.status_code == 200

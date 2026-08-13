@@ -137,11 +137,28 @@ LEFT JOIN appeals a ON a.denial_id = d.denial_id
 
 # --------------------------------------------------------------------------- api
 
+def build_info() -> dict:
+    """When this board's data was built, and how long ago that was.
+
+    Every deadline is anchored to build day, so the age of the build is the age
+    of the demo. Nulls if the DB predates the ``meta`` table — old data still
+    serves, it just cannot say how old it is.
+    """
+    try:
+        row = one("SELECT value FROM meta WHERE key = 'built_at'")
+    except sqlite3.Error:
+        row = None
+    built = row["value"] if row else None
+    age = (date.today() - date.fromisoformat(built)).days if built else None
+    return {"built_at": built, "built_days_ago": age}
+
+
 @app.get("/api/health")
 def health():
     n = one("SELECT (SELECT COUNT(*) FROM patients) patients, (SELECT COUNT(*) FROM denials) denials,"
             " (SELECT COUNT(*) FROM appeals) appeals")
-    return {"status": "ok", **n, "letters_on_disk": len(list(LETTERS.glob("DEN-*.pdf")))}
+    return {"status": "ok", **n, **build_info(),
+            "letters_on_disk": len(list(LETTERS.glob("DEN-*.pdf")))}
 
 
 @app.get("/api/stats")

@@ -117,6 +117,11 @@ CREATE INDEX idx_denials_claim ON denials(claim_id);
 CREATE INDEX idx_denials_payer ON denials(payer_id);
 CREATE INDEX idx_denials_category ON denials(category);
 CREATE INDEX idx_appeals_denial ON appeals(denial_id);
+
+-- The whole timeline is anchored to build day, so the build date *is* the
+-- shelf life of the demo. Recording it lets /api/health say how old the
+-- deployed board is without anyone rebuilding it locally to find out.
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 # --------------------------------------------------------------------------
@@ -458,6 +463,15 @@ def load_bundles() -> list[dict]:
     return [json.loads(p.read_text()) for p in sorted(RAW.glob("*.json"))]
 
 
+def stamp(con: sqlite3.Connection, when: date | None = None) -> str:
+    """Record build day in ``meta``. Everything in the board is relative to it."""
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    built = (when or date.today()).isoformat()
+    con.execute("INSERT OR REPLACE INTO meta VALUES ('built_at', ?)", (built,))
+    con.commit()
+    return built
+
+
 def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
     drafted = dump_drafts(db_path, drafts_path)
     if db_path.exists():
@@ -683,6 +697,7 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
 
     con.commit()
     stats["drafts_restored"] = restore_drafts(con, drafts_path)
+    stats["built_at"] = stamp(con)
     con.close()
     # the timeline moved with today's date, so the cached prose now cites dates
     # this claim no longer has -- re-point it (textual, no LLM calls)
@@ -691,5 +706,14 @@ def build(db_path: Path = DB_PATH, drafts_path: Path = DRAFTS_PATH) -> dict:
 
 
 if __name__ == "__main__":
+    import sys
+
+    if "--stamp" in sys.argv:      # backfill a DB built before meta existed
+        when = date.fromisoformat(sys.argv[sys.argv.index("--stamp") + 1])
+        con = sqlite3.connect(DB_PATH)
+        print(f"stamped {DB_PATH}: built_at={stamp(con, when)}")
+        con.close()
+        raise SystemExit(0)
+
     s = build()
     print(f"built {DB_PATH}: {s}")
