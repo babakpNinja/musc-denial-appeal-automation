@@ -348,13 +348,38 @@ def status_events(denial_id: str) -> list[dict]:
         con.close()
 
 
+def orphan_ids() -> list[str]:
+    """Workflow rows whose case no longer exists in ``denials`` (#19).
+
+    Invisible everywhere else: `/api/cases` joins against `denials`, `/api/stats`
+    walks the denial list, so an orphan renders nowhere — but it still occupies
+    the durable volume, and if an id were ever reused it would come back wearing
+    a stranger's history. One appeared for real when #11 renumbered denial ids.
+
+    Both tables count, joined by id rather than by row: an event whose status row
+    is already gone is the same garbage, and looking only at `appeal_status`
+    would report a clean board while the timeline still remembered the case.
+    """
+    known = {r["denial_id"] for r in q("SELECT denial_id FROM denials")}
+    con = status_con()
+    try:
+        seen = {r[0] for r in con.execute("SELECT denial_id FROM appeal_status"
+                                         " UNION SELECT denial_id FROM appeal_status_events")}
+    finally:
+        con.close()
+    return sorted(seen - known)
+
+
 @app.get("/api/workflow")
 def workflow():
     """Where appeal status is stored and whether it survives a redeploy."""
+    orphans = orphan_ids()
     return {
         "statuses": list(STATUSES),
         "transitions": {k: list(v) for k, v in TRANSITIONS.items()},
         "warn_days": DEADLINE_WARN_DAYS,
+        "orphans": len(orphans),
+        "orphan_ids": orphans[:25],   # named, so the condition is diagnosable read-only
         "durable": is_durable(),
         "store": str(status_db_path()),
         "note": ("Appeal status is stored on a mounted volume and persists across redeploys."
@@ -527,6 +552,31 @@ def workflow_reset(payload: dict = Body(default={}), x_demo_token: str | None = 
         con.close()
     return {"cleared": cleared, "restored": len(rows), "scope": "all" if ids is None else len(ids),
             "durable": is_durable()}
+
+
+@app.post("/api/workflow/prune")
+def workflow_prune(x_demo_token: str | None = Header(default=None)):
+    """Delete the workflow rows of cases that no longer exist (#19).
+
+    Behind the same admin door as `reset`, because it deletes durable history —
+    but unlike `reset` it cannot touch a live case: the ids come from
+    ``orphan_ids()``, which is exactly the set `denials` does not contain. Deletes
+    id by id for that reason; the two tables live in a different database file
+    from `denials`, so there is no `NOT IN (SELECT …)` to lean on.
+    """
+    require_demo_admin(x_demo_token)
+    ids = orphan_ids()
+    con = status_con()
+    try:
+        rows = events = 0
+        for did in ids:
+            rows += con.execute("DELETE FROM appeal_status WHERE denial_id=?", (did,)).rowcount
+            events += con.execute("DELETE FROM appeal_status_events WHERE denial_id=?", (did,)).rowcount
+        con.commit()
+    finally:
+        con.close()
+    return {"pruned": len(ids), "denial_ids": ids, "rows": rows, "events": events,
+            "remaining": len(orphan_ids()), "durable": is_durable()}
 
 
 @app.post("/api/cases/{denial_id}/regenerate")

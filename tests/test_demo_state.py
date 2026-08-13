@@ -129,6 +129,101 @@ def test_restore_refuses_an_unknown_case_or_a_bogus_status(client, ids):
     assert client.get(f"/api/cases/{ids[0]}/status").json()["appeal_status"] == "ready"
 
 
+# ------------------------------------------------------- orphaned rows (#19)
+
+GONE = "DEN-MUSC-DELETED-1"
+
+
+def plant_orphan(did=GONE, *, status="submitted", events=True):
+    """Write workflow rows for a case that does not exist.
+
+    This is what #11 left behind when it renumbered denial ids: the workflow DB is
+    a separate file with no foreign key into `denials`, so nothing stops it.
+    """
+    con = webapp.status_con()
+    try:
+        con.execute("INSERT INTO appeal_status(denial_id,status,submitted_at,outcome,note,updated_at)"
+                    " VALUES(?,?,?,?,?,?)", (did, status, None, None, "left over", "2026-01-01T00:00:00+00:00"))
+        if events:
+            con.execute("INSERT INTO appeal_status_events(denial_id,from_status,to_status,note,at)"
+                        " VALUES(?,?,?,?,?)", (did, "ready", status, None, "2026-01-01T00:00:00+00:00"))
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_an_orphan_is_counted_and_named_but_renders_nowhere(client):
+    plant_orphan()
+    wf = client.get("/api/workflow").json()
+    assert wf["orphans"] == 1 and wf["orphan_ids"] == [GONE]
+    # why it needed counting: every read path joins against `denials`
+    assert GONE not in [c["denial_id"] for c in client.get("/api/cases?limit=1000").json()]
+    assert client.get(f"/api/cases/{GONE}/status").status_code == 404
+    assert client.get("/api/stats").json()["workflow"]["submitted"]["denials"] == 0
+
+
+def test_a_moved_case_is_not_an_orphan(client, ids):
+    move(client, ids[0], "submitted")
+    wf = client.get("/api/workflow").json()
+    assert (wf["orphans"], wf["orphan_ids"]) == (0, [])
+
+
+def test_an_event_whose_status_row_is_gone_still_counts(client):
+    """The half that a status-table-only query would call clean."""
+    plant_orphan()
+    con = webapp.status_con()
+    try:
+        con.execute("DELETE FROM appeal_status WHERE denial_id=?", (GONE,))
+        con.commit()
+    finally:
+        con.close()
+    assert client.get("/api/workflow").json()["orphans"] == 1
+
+
+def test_prune_removes_the_orphan_and_leaves_live_cases_alone(client, ids):
+    move(client, ids[0], "submitted", "real work")
+    move(client, ids[1], "submitted")
+    move(client, ids[1], "overturned", "payer paid")
+    plant_orphan()
+
+    res = client.post("/api/workflow/prune", headers={"X-Demo-Token": TOKEN}).json()
+    assert res["pruned"] == 1 and res["denial_ids"] == [GONE]
+    assert (res["rows"], res["events"]) == (1, 1)
+    assert res["remaining"] == 0
+
+    assert client.get("/api/workflow").json()["orphans"] == 0
+    kept = client.get(f"/api/cases/{ids[0]}/status").json()
+    assert kept["appeal_status"] == "submitted" and kept["status_note"] == "real work"
+    assert [e["to_status"] for e in kept["events"]] == ["submitted"]
+    assert client.get(f"/api/cases/{ids[1]}/status").json()["appeal_status"] == "overturned"
+
+
+def test_prune_on_a_clean_board_changes_nothing(client, ids):
+    move(client, ids[0], "submitted")
+    res = client.post("/api/workflow/prune", headers={"X-Demo-Token": TOKEN}).json()
+    assert (res["pruned"], res["denial_ids"], res["rows"], res["events"]) == (0, [], 0, 0)
+    assert client.get(f"/api/cases/{ids[0]}/status").json()["appeal_status"] == "submitted"
+
+
+def test_prune_is_behind_the_same_admin_door(client, monkeypatch):
+    plant_orphan()
+    assert client.post("/api/workflow/prune").status_code == 403
+    assert client.post("/api/workflow/prune", headers={"X-Demo-Token": "nope"}).status_code == 403
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+    assert client.post("/api/workflow/prune").status_code == 404
+    assert client.get("/api/workflow").json()["orphans"] == 1   # refused, not partially done
+
+
+def test_the_cli_reports_orphans_read_only_and_prunes_them(cli, client, ids):
+    move(client, ids[0], "submitted")
+    plant_orphan()
+    said = cli.describe(cli.snapshot("http://test"))
+    assert "1 orphan row(s)" in said and GONE in said, said
+    assert cli.prune("http://test", TOKEN)["pruned"] == 1
+    after = cli.describe(cli.snapshot("http://test"))
+    assert "orphan" not in after, after
+
+
 # ---------------------------------------------------------------- the CLI use
 
 def test_snapshot_only_carries_the_cases_that_moved(cli, client, ids):

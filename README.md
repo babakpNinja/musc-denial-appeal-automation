@@ -132,11 +132,12 @@ with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, ins
 | `GET /letters/{denial_id}.pdf?download=1` | one appeal letter |
 | `GET /letters.zip?payer=` | bulk download |
 | `POST /api/cases/{denial_id}/regenerate` | re-draft a single letter |
-| `GET /api/workflow` | statuses, legal transitions, where status is stored and whether it is durable |
+| `GET /api/workflow` | statuses, legal transitions, where status is stored and whether it is durable, and `orphans`/`orphan_ids` — workflow rows whose case no longer exists |
 | `GET /api/cases/{denial_id}/status` | current status + event history |
 | `POST /api/cases/{denial_id}/status` | `{"status": "submitted", "note": "faxed, ref 8821"}` — 409 on an illegal transition |
 | `POST /api/cases/status/bulk` | `{"denial_ids": [...], "status": "submitted", "note": "..."}` — per-case `ok`/`error`, max 500 |
 | `POST /api/workflow/reset` | admin-only: wipe status and optionally replay a snapshot (404 unless `DEMO_ADMIN_TOKEN` is set) |
+| `POST /api/workflow/prune` | admin-only: delete workflow rows for cases that no longer exist; reports the ids it removed |
 
 ## Appeal lifecycle
 
@@ -177,14 +178,21 @@ python demo_state.py show     --base https://…                      # what is 
 python demo_state.py snapshot --base https://… -o data/demo_state.json
 python demo_state.py restore  --base https://… -i data/demo_state.json   # replay it exactly
 python demo_state.py reset    --base https://…                      # everything back to ready
+python demo_state.py prune    --base https://…                      # drop rows for deleted cases
 ```
 
-`snapshot`/`show` are read-only; `restore`/`reset` go through `POST /api/workflow/reset`, which
+`snapshot`/`show` are read-only; `restore`/`reset`/`prune` go through `POST /api/workflow/…`, which
 **does not exist** unless the deployment sets `DEMO_ADMIN_TOKEN` (an unset token means 404, a wrong
 one means 403). Pass the same value with `--token` or in the environment. A snapshot only carries
 the cases that moved — it is a diff against a fresh board — and restore replays `submitted_at`,
 the note and the whole event timeline verbatim, so the board ends up as found rather than with a
 stray "withdrawn" entry in a case's history.
+
+**Orphaned rows.** `appeal_status.db` has no foreign key into `denials` — different file — so a
+rebuild that renumbers denial ids can leave status rows behind. They render nowhere (every read
+path joins against `denials`), which is exactly why they need counting: `show` and `GET
+/api/workflow` report `orphans`, and `prune` deletes them. `prune` cannot touch a live case; the
+ids it deletes are by definition the ones `denials` does not contain.
 
 Railway's filesystem is ephemeral, so without a mounted volume the dashboard shows a **Demo mode**
 banner and `/api/workflow` reports `durable: false` — the workflow is deliberately explicit about
