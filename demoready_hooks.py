@@ -13,6 +13,7 @@ top of their board while every other check here says READY (#106).
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -32,6 +33,16 @@ LOGO = "/assets/musc-logo-navy.png"
 # Counted and named rather than dropped: a check nobody made reads like one that
 # passed.
 TEMPLATE = "${"
+PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
+
+# How to fill a template from the live board (#107), keyed by the exact placeholder
+# text. Only one entry, deliberately: `/letters/${c.denial_id}.pdf?download=1` is
+# the link a client actually clicks — every row of the queue has one — so leaving it
+# skipped meant the most-used link on the board had no check at all. Not a generic
+# expander: `${esc(c.appeal_url||c.portal_url)}` is a payer's own portal, somebody
+# else's deploy, and there is nothing honest to fill it with. Those stay unresolved
+# and are reported as unresolved.
+FILL = {"${c.denial_id}": lambda base: _get(base, "/api/cases?limit=1")[0]["denial_id"]}
 
 
 def _get(base: str, path: str):
@@ -101,6 +112,65 @@ def letters(base: str) -> dict:
                        else f"{on_disk} letters on disk")}
 
 
+def resolve(base: str, template: str) -> str | None:
+    """One concrete instance of a templated href, or None if nothing can fill it.
+
+    Filled from live data rather than a made-up id: the URL *shape* is what is being
+    checked, and a guessed denial id 404s on a perfectly healthy board.
+    """
+    url = template
+    for ph in dict.fromkeys(PLACEHOLDER.findall(template)):
+        if ph not in FILL:
+            return None
+        url = url.replace(ph, str(FILL[ph](base)))
+    return url
+
+
+def instances(base: str, templated: list[str]) -> tuple[dict, dict]:
+    """Split the JS-built links into the ones filled from live data and the rest.
+
+    Two dicts, not one number: a link that was resolved and fetched must not read
+    like one nothing was ever asked about. Failing to *read* the live data is its own
+    answer again — the check could not run for that link, which is not a pass.
+    """
+    urls, unresolved = {}, {}
+    for t in templated:
+        try:
+            url = resolve(base, t)
+        except Exception as e:                  # the API that fills it is unreadable
+            unresolved[t] = f"live data unreadable ({type(e).__name__})"
+            continue
+        if url is None:
+            unresolved[t] = "no live value to fill it with"
+        else:
+            urls[t] = url
+    return urls, unresolved
+
+
+def by_reason(unresolved: dict) -> dict:
+    """Group the unchecked links by why, so three identical reasons print once."""
+    out: dict[str, list[str]] = {}
+    for t, why in sorted(unresolved.items()):
+        out.setdefault(why, []).append(t)
+    return out
+
+
+def every_row(base: str) -> bool:
+    """Is a 404 on one per-case letter link the whole queue, or just that row?
+
+    One instance is fetched, so this is what tells the two apart: if the deploy says
+    it holds a letter for every denial and the URL still 404s, the route shape is
+    wrong — a rename, a changed query param — and every row's PDF button is broken.
+    A genuinely missing file is the ``letters`` check's job, and it says DOWN there.
+    """
+    try:
+        h = _get(base, "/api/health")
+    except Exception:
+        return False
+    on_disk, denials = h.get("letters_on_disk"), h.get("denials")
+    return on_disk is not None and denials is not None and on_disk >= denials
+
+
 def assets(base: str) -> dict:
     """Does everything the board's page hangs off itself actually deploy? (#106)
 
@@ -108,9 +178,10 @@ def assets(base: str) -> dict:
     its own: the board renders, every API answers, and the client's brand is a
     broken-image icon above their own cases. Nothing else here would notice.
 
-    The per-case PDF links are built in JavaScript from a template, so there is no
-    URL to ask for — those are counted as skipped rather than passed over, because
-    a check nobody made reads exactly like one that passed.
+    The per-case links are built in JavaScript, so there is no URL in the HTML to ask
+    for. One instance of each is filled from live data instead (#107) — the PDF link
+    is the most-clicked thing on the board — and the templates nothing can fill are
+    reported as unchecked, because a check nobody made reads like one that passed.
     """
     page = _page(base)
     refs = ([t.get("href", "") for t in tags_in(page, LINK)]
@@ -119,18 +190,32 @@ def assets(base: str) -> dict:
     templated = sorted({r for r in refs if TEMPLATE in r})
     wanted = sorted({r for r in refs if fetched(r) and TEMPLATE not in r})
     missing = [r for r in wanted if _status(base, r) != 200]
+    resolved, unresolved = instances(base, templated)
+    broken = sorted(u for u in resolved.values() if _status(base, u) != 200)
 
-    skipped = f"; {len(templated)} link(s) built in JS not checked" if templated else ""
+    note = ""
+    if resolved:
+        note += (f"; {len(resolved)} JS link(s) resolved from live data and load "
+                 f"({', '.join(sorted(resolved.values()))})")
+    for why, ts in sorted(by_reason(unresolved).items()):
+        # counted per reason: "nothing to fill it with" is the board's design, while
+        # "the API would not answer" is a check that wanted to run and could not
+        note += f"; {len(ts)} JS link(s) not checked ({why}): {', '.join(ts)}"
     if LOGO in missing:
         return {"name": "assets", "state": DOWN,
                 "detail": f"the MUSC logo is not deployed ({LOGO}) — the client's own brand "
                           f"renders as a broken image on their board; do not show it"}
-    if missing:
+    if broken and every_row(base):
+        return {"name": "assets", "state": DOWN,
+                "detail": f"{', '.join(broken)} 404s while the deploy says it has a letter for "
+                          f"every denial — the per-case link shape is wrong, so the PDF button "
+                          f"on *every* row is broken; do not show it"}
+    if missing or broken:
         return {"name": "assets", "state": DIRTY,
-                "detail": f"linked file(s) missing: {', '.join(missing)} — the board reads "
-                          f"fine, the link fails when pressed"}
+                "detail": f"linked file(s) missing: {', '.join(missing + broken)} — the board "
+                          f"reads fine, the link fails when pressed{note}"}
     return {"name": "assets", "state": READY,
-            "detail": f"{len(wanted)} linked file(s) load{skipped}"}
+            "detail": f"{len(wanted)} linked file(s) load{note}"}
 
 
 def checks(base: str) -> list[dict]:
