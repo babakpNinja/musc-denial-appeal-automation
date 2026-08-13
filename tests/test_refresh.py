@@ -27,11 +27,21 @@ RED = json.dumps([{"target": "musc-appeals", "ok": False,
                                "problems": ["'#caseRows tr' never rendered"]}]}])
 
 
+def mirror_report(live: bool = True, pushed: bool = True) -> str:
+    """What `mirror.py push --wait --json` says: pushed, and is the new build serving?"""
+    return json.dumps({"target": "musc-appeals", "repo": "x/y", "changes": [" M data/musc_appeals.db"],
+                       "pushed": pushed, "commit": "deadbee1234",
+                       "wait": {"live": live, "proven": live, "waited": 61,
+                                "note": "serving deadbee after 61s" if live
+                                        else "never served deadbee within 900s"}})
+
+
 class FakeRun:
     """Stand in for build_db/generate_letters/pytest/git/mirror.py/uptime.py."""
 
-    def __init__(self, fail: str | None = None, uptime: str = GREEN):
+    def __init__(self, fail: str | None = None, uptime: str = GREEN, mirror: str | None = None):
         self.fail, self.uptime, self.calls = fail, uptime, []
+        self.mirror = mirror or mirror_report()
 
     def __call__(self, cmd, cwd=None, timeout=None):
         joined = " ".join(str(c) for c in cmd)
@@ -39,6 +49,8 @@ class FakeRun:
         rc = 1 if self.fail and self.fail in joined else 0
         if "uptime.py" in joined:
             out, rc = self.uptime, 0 if self.uptime == GREEN else 1
+        elif "mirror.py" in joined:
+            out = self.mirror
         elif "pytest" in joined:
             out = "155 passed in 4.8s"
         elif "rev-parse" in joined:
@@ -56,7 +68,6 @@ def rig(monkeypatch):
     """A board that is `drift` days old, with the plumbing faked out."""
     run = FakeRun()
     monkeypatch.setattr(rd, "run", run)
-    monkeypatch.setattr(rd, "wait_for_live_data", lambda *a, **k: True)
     # by default the live deploy cannot say how old it is, so every run has to
     # rebuild to find out — the tests below that care set an age explicitly
     monkeypatch.setattr(rd, "live_build_age", lambda base: None)
@@ -201,11 +212,29 @@ def test_workflow_state_is_only_rewritten_when_the_deploy_actually_lost_it(rig, 
 
 
 def test_a_deploy_that_never_serves_the_new_data_stops_short_of_restoring(rig, monkeypatch):
-    rig(drift=30)
+    run = rig(drift=30)
+    run.mirror = mirror_report(live=False)
     snapshots(monkeypatch, [{"denial_id": "DEN-1", "status": "submitted"}])
-    monkeypatch.setattr(rd, "wait_for_live_data", lambda *a, **k: False)
     res = rd.refresh("http://x", "t", dry_run=False, commit=True)
     assert not res["ok"] and "never served" in res["error"] and res["pushed"]
+    assert "restore by hand" in res["error"]
+    assert not run.ran("uptime.py")          # nothing is verified against the old container
+
+
+def test_the_push_asks_the_mirror_to_wait_for_the_new_container(rig, monkeypatch):
+    run = rig(drift=30)
+    snapshots(monkeypatch, [])
+    res = rd.refresh("http://x", "t", dry_run=False, commit=True)
+    assert res["ok"] and run.ran("mirror.py push musc-appeals --wait --json")
+    assert res["deploy"]["proven"] and res["deploy"]["commit"] == "deadbee1234"
+
+
+def test_a_mirror_that_reports_nothing_is_a_failed_push_not_a_silent_pass(rig, monkeypatch):
+    run = rig(drift=30)
+    run.mirror = "Traceback (most recent call last): gh: not found"
+    snapshots(monkeypatch, [])
+    res = rd.refresh("http://x", "t", dry_run=False, commit=True)
+    assert not res["ok"] and not res["pushed"] and "no report" in res["error"]
 
 
 def test_drift_is_the_median_shift_so_one_odd_case_cannot_skew_it():

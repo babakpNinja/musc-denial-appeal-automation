@@ -153,11 +153,21 @@ def build_info() -> dict:
     return {"built_at": built, "built_days_ago": age}
 
 
+def revision() -> str | None:
+    """Which commit is actually serving — Railway injects it at deploy time.
+
+    Without this a push can only be waited on by "does it answer", which cannot
+    tell the new container from the old one still running; ``mirror.py push
+    --wait`` polls for exactly this value. None locally, and that is honest.
+    """
+    return os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("DEPLOY_REVISION")
+
+
 @app.get("/api/health")
 def health():
     n = one("SELECT (SELECT COUNT(*) FROM patients) patients, (SELECT COUNT(*) FROM denials) denials,"
             " (SELECT COUNT(*) FROM appeals) appeals")
-    return {"status": "ok", **n, **build_info(),
+    return {"status": "ok", **n, **build_info(), "revision": revision(),
             "letters_on_disk": len(list(LETTERS.glob("DEN-*.pdf")))}
 
 

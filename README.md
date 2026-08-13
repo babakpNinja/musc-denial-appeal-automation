@@ -103,6 +103,12 @@ Because the whole board hangs off build day, `build_db.py` records that day in a
 without rebuilding to find out. A DB built before this existed reports nulls; stamp it with
 `python build_db.py --stamp YYYY-MM-DD`.
 
+`/api/health` also reports `revision` — Railway's `RAILWAY_GIT_COMMIT_SHA` for the running
+container, null locally. `tools/mirror.py push musc-appeals --wait` polls it until the commit it
+just pushed is the one answering, which is the only honest way to know the *new* container is
+live: a build reporting SUCCESS just means the image exists, and the old container answers 200
+the whole time. `refresh_demo.py` relies on that before it restores workflow state.
+
 ### Who gets billed
 
 The 50 FHIR patients are all kept as clinical records, but only the 35 who could plausibly
@@ -117,7 +123,7 @@ with the claim timeline (service ≤ submitted ≤ denial < appeal deadline, ins
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health` | counts, letters on disk, and `built_at` / `built_days_ago` — how old the deployed board is |
+| `GET /api/health` | counts, letters on disk, `built_at` / `built_days_ago` (how old the deployed board is) and `revision` (the commit actually serving) |
 | `GET /api/stats` | KPIs, per-payer, per-reason, per-CARC, per-month aggregates |
 | `GET /api/cases?payer=&category=&search=` | filtered case list |
 | `GET /api/cases/{denial_id}` | full case: denial, claim, coverage, clinical context, letter text |

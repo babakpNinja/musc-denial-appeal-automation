@@ -29,7 +29,6 @@ import json
 import sqlite3
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.request
 from datetime import date
@@ -118,24 +117,26 @@ def live_build_age(base: str) -> int | None:
         return None
 
 
-def wait_for_live_data(base: str, denial_id: str, deadline: str, timeout: int = 900) -> bool:
-    """Poll until the deployed app serves the rebuilt timeline, not just any 200.
+def push_and_wait(message: str, timeout: int = 900) -> dict:
+    """Push the mirror and don't come back until the new container is answering.
 
-    A Railway build reporting SUCCESS only means the image exists; the old
-    container can still be answering. Restoring state into it would be lost.
+    The waiting used to live here and identified the new build by polling a
+    denial deadline — a signal only this app has. ``mirror.py`` does it generically
+    now (issue #26): the deploy reports the commit it is running, so this returns
+    ``pushed``/``live``/``proven`` and the caller can refuse to write state into a
+    container that is about to be replaced.
     """
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            with urllib.request.urlopen(f"{base}/api/cases/{denial_id}", timeout=20) as resp:
-                got = (json.loads(resp.read()) or {}).get("appeal_deadline")
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError):
-            got = None
-        print(f"  live deadline for {denial_id}: {got} (want {deadline})", flush=True)
-        if got == deadline:
-            return True
-        time.sleep(20)
-    return False
+    res = run([sys.executable, "tools/mirror.py", "push", UPTIME_TARGET, "--wait", "--json",
+               "-m", message], cwd=REPO, timeout=timeout + 300)
+    try:
+        out = json.loads(res.stdout)
+    except ValueError:
+        return {"pushed": False, "live": False, "proven": False,
+                "note": f"mirror push produced no report: {(res.stderr or res.stdout).strip()[-300:]}"}
+    wait = out.get("wait") or {}
+    return {"pushed": bool(out.get("pushed")), "commit": out.get("commit"),
+            "live": wait.get("live"), "proven": bool(wait.get("proven")),
+            "note": wait.get("note", "nothing to push")}
 
 
 def verify_live(target: str = UPTIME_TARGET) -> tuple[bool, list[str]]:
@@ -214,17 +215,14 @@ def refresh(base: str, token: str, dry_run: bool, commit: bool,
     out["snapshot"] = demo_state.describe(snap)
     print(f"live board before push: {out['snapshot']}", flush=True)
 
-    push = run([sys.executable, "tools/mirror.py", "push", "musc-appeals",
-                "-m", "refresh demo timeline"], cwd=REPO)
-    if push.returncode != 0:
-        return {**out, "ok": False, "error": f"mirror push failed: {push.stderr.strip()[-300:]}"}
+    deploy = push_and_wait("refresh demo timeline")
+    out["deploy"] = deploy
+    if not deploy["pushed"]:
+        return {**out, "ok": False, "error": f"mirror push failed: {deploy['note']}"}
     out["pushed"] = True
-
-    fresh = deadlines()
-    did = next(iter(fresh))
-    if not wait_for_live_data(base, did, fresh[did]):
+    if deploy["live"] is False:
         return {**out, "ok": False,
-                "error": "pushed, but the live app never served the rebuilt timeline — "
+                "error": f"pushed, but the live app never served the new build ({deploy['note']}) — "
                          "board state NOT restored yet, run demo_state.py restore by hand"}
 
     if snap["cases"] and demo_state.snapshot(base)["cases"] != snap["cases"]:
