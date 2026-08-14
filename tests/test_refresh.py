@@ -377,3 +377,38 @@ def test_a_verified_push_says_so(rig, monkeypatch):
     res = rd.refresh("http://x", "t", dry_run=False, commit=True)
     assert res["ok"] and res["verified"] is True
     assert "verified live" in rd.summarise(res)
+
+
+# --------------------------------------------------- the token it needs to run
+# Without it the monthly cron cannot put the board back after its push, so it
+# refuses to push at all — and the reason has to say the box lost state, not that
+# a flag was forgotten (#195).
+
+def test_a_run_with_no_token_anywhere_refuses_to_push_and_says_why(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+    monkeypatch.setattr(rd.demo_state, "ENV_FILE", tmp_path / ".env.demo")
+    monkeypatch.setattr(rd, "refresh", lambda *a, **k: pytest.fail("must not rebuild"))
+
+    assert rd.main(["--base", "http://x"]) == 2
+    said = capsys.readouterr().err
+    assert "tools/bootstrap.py" in said and "refuses to push" in said
+
+
+def test_the_token_comes_from_the_same_reader_demo_state_uses(monkeypatch, tmp_path):
+    """Two parsers of one cache file drift apart in exactly the situation neither
+    of them can report."""
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+    env = tmp_path / ".env.demo"
+    env.write_text("DEMO_ADMIN_TOKEN=from-the-file\n")
+    monkeypatch.setattr(rd.demo_state, "ENV_FILE", env)
+    seen = {}
+
+    def fake_refresh(base, token, *a, **k):
+        seen["token"] = token
+        return {"ok": True}
+
+    monkeypatch.setattr(rd, "refresh", fake_refresh)
+    monkeypatch.setattr(rd, "summarise", lambda res: "")
+
+    assert rd.main(["--base", "http://x"]) == 0
+    assert seen["token"] == "from-the-file"

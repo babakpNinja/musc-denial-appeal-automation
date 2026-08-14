@@ -322,15 +322,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    token = args.token
+    # one reader for the token, in demo_state — this is the same cache file, and
+    # two parsers of it drift apart in exactly the situation neither can report
+    token = demo_state.resolve_token(args.token)
     if not token and not args.dry_run:
-        env = REPO / ".env.demo"
-        if env.exists():
-            token = env.read_text().partition("=")[2].strip()
-        if not token:
-            print("no DEMO_ADMIN_TOKEN (.env.demo missing) — state could not be restored after a "
-                  "push; pass --token or run with --dry-run", file=sys.stderr)
-            return 2
+        print("state could not be restored after a push, so this run refuses to push.\n"
+              + demo_state.no_token_message() + "or run with --dry-run.", file=sys.stderr)
+        return 2
 
     res = refresh(args.base, token, args.dry_run, not args.no_commit,
                   0 if args.force else args.min_drift_days, args.max_lapsed)

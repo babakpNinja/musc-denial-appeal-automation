@@ -261,3 +261,67 @@ def test_describe_says_what_a_snapshot_holds(cli, client, ids):
     assert "all at ready" in cli.describe(cli.snapshot("http://test"))
     move(client, ids[0], "submitted")
     assert "1 submitted" in cli.describe(cli.snapshot("http://test"))
+
+
+# ------------------------------------------------- where the token comes from
+# The token is standing state that lives on the Railway service and is cached in
+# a gitignored `.env.demo`. A re-provision wipes the cache, and the failure was a
+# one-line "no token: pass --token", which reads like a forgotten flag rather
+# than like the only undo for a live smoke test being gone (#195).
+
+@pytest.fixture()
+def env_file(tmp_path, monkeypatch):
+    """A stand-in .env.demo — the real one must never be what a test reads."""
+    path = tmp_path / ".env.demo"
+    monkeypatch.setattr(demo_state, "ENV_FILE", path)
+    return path
+
+
+def test_the_token_is_read_from_the_boxs_file_when_nothing_else_supplies_it(env_file, monkeypatch):
+    """A healthy box should not need `--token` at all; the flag being effectively
+    mandatory is what made the missing file look like an ordinary usage error."""
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+    env_file.write_text(f"DEMO_ADMIN_TOKEN={TOKEN}\n")
+
+    assert demo_state.resolve_token() == TOKEN
+
+
+def test_the_explicit_flag_and_the_environment_outrank_the_cached_file(env_file, monkeypatch):
+    """The file is a cache of the deployed value. Anything said out loud is more
+    likely to be the current one — a rotation reaches the flag first."""
+    env_file.write_text("DEMO_ADMIN_TOKEN=from-file\n")
+    monkeypatch.setenv("DEMO_ADMIN_TOKEN", "from-env")
+
+    assert demo_state.resolve_token("explicit") == "explicit"
+    assert demo_state.resolve_token() == "from-env"
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN")
+    assert demo_state.resolve_token() == "from-file"
+
+
+def test_a_file_without_the_line_is_the_same_as_no_file(env_file):
+    env_file.write_text("SOMETHING_ELSE=x\n")
+    assert demo_state.read_env_token() == ""
+    env_file.write_text(f"SOMETHING_ELSE=x\nDEMO_ADMIN_TOKEN={TOKEN}\n")
+    assert demo_state.read_env_token() == TOKEN
+
+
+def test_a_wiped_box_is_told_it_lost_state_and_how_to_get_it_back(cli, env_file, monkeypatch, capsys):
+    """The message is the entire recovery path for whoever is mid-smoke-test, so
+    it has to name the file that went missing and the command that restores it —
+    not the flag they did not type."""
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+
+    code = demo_state.main(["reset", "--base", "http://test"])
+    said = capsys.readouterr().err
+
+    assert code == 1
+    assert "tools/bootstrap.py" in said
+    assert str(env_file) in said
+    assert "standing state" in said
+
+
+def test_read_only_commands_never_ask_for_a_token(cli, client, env_file, monkeypatch):
+    """`show` on a live board is the first thing anyone runs, and it must keep
+    working on a box that has lost the file."""
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+    assert demo_state.main(["show", "--base", "http://test"]) == 0

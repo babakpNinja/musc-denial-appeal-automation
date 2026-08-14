@@ -14,8 +14,10 @@ demo: take a snapshot first, do the smoke test, restore.
 
 ``snapshot`` and ``show`` are read-only. ``restore``, ``reset`` and ``prune`` call
 ``POST /api/workflow/…``, which only exists when the deployment has
-``DEMO_ADMIN_TOKEN`` set; pass the same value with ``--token`` or in the
-``DEMO_ADMIN_TOKEN`` environment variable.
+``DEMO_ADMIN_TOKEN`` set; pass the same value with ``--token``, in the
+``DEMO_ADMIN_TOKEN`` environment variable, or leave it to be read from the agent
+box's gitignored ``.env.demo`` (``python tools/bootstrap.py`` puts that file back
+from the Railway service after a re-provision).
 """
 
 from __future__ import annotations
@@ -31,8 +33,47 @@ from pathlib import Path
 
 TIMEOUT = 30
 DEFAULT_BASE = "http://127.0.0.1:8080"
+# The agent's box keeps the admin token here, gitignored. Absent in a clone of the
+# deploy repo, which is the point: the file is a local cache of a value that lives
+# on the Railway service.
+ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env.demo"
 # what a snapshot keeps per case; anything else is derived and would go stale
 FIELDS = ("denial_id", "status", "submitted_at", "outcome", "note", "updated_at")
+
+
+def no_token_message() -> str:
+    """Said when there is no token anywhere. It is the whole recovery path.
+
+    The old wording — "no token: pass --token or set DEMO_ADMIN_TOKEN" — reads
+    like a forgotten flag. The real situation is usually that the box lost
+    standing state, while the caller is mid-smoke-test on a live client board
+    with no way to put it back (#195).
+    """
+    return (
+        "no DEMO_ADMIN_TOKEN — this is lost standing state, not a missing flag.\n"
+        "The value lives on the Railway service; this box keeps a gitignored copy\n"
+        f"in {ENV_FILE}, which a re-provision wipes. Put it back with:\n"
+        "    python tools/bootstrap.py        # restores .env.demo from the service\n"
+        "or pass --token explicitly if you have it.\n"
+    )
+
+
+def read_env_token() -> str:
+    """The token from the box's ``.env.demo``, or "" if this is not that box."""
+    try:
+        text = ENV_FILE.read_text()
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "DEMO_ADMIN_TOKEN":
+            return value.strip()
+    return ""
+
+
+def resolve_token(explicit: str = "") -> str:
+    """--token, then the environment, then the box's cache file."""
+    return explicit or os.environ.get("DEMO_ADMIN_TOKEN", "") or read_env_token()
 
 
 def api(base: str, path: str, payload: dict | None = None, token: str | None = None):
@@ -133,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", default=os.environ.get("MUSC_BASE", DEFAULT_BASE))
     ap.add_argument("-o", "--out", help="snapshot: file to write (default stdout)")
     ap.add_argument("-i", "--in", dest="infile", help="restore: snapshot file to replay")
-    ap.add_argument("--token", default=os.environ.get("DEMO_ADMIN_TOKEN", ""))
+    ap.add_argument("--token", default="",
+                    help="default: $DEMO_ADMIN_TOKEN, then the box's .env.demo")
     ap.add_argument("--case", action="append", default=[], help="reset: limit to these denial ids")
     args = ap.parse_args(argv)
 
@@ -152,12 +194,12 @@ def main(argv: list[str] | None = None) -> int:
             print(text, end="")
         return 0
 
-    if not args.token:
-        return int(bool(sys.stderr.write(
-            "no token: pass --token or set DEMO_ADMIN_TOKEN (it must match the deployment)\n")))
+    token = resolve_token(args.token)
+    if not token:
+        return int(bool(sys.stderr.write(no_token_message())))
 
     if args.command == "prune":
-        res = prune(args.base, args.token)
+        res = prune(args.base, token)
         named = ", ".join(res["denial_ids"]) or "none"
         print(f"pruned {res['pruned']} orphan case(s): {named} "
               f"({res['rows']} status row(s), {res['events']} event(s)); "
@@ -166,10 +208,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.infile:
             return int(bool(sys.stderr.write("restore needs -i <snapshot.json>\n")))
         snap = json.loads(Path(args.infile).read_text())
-        res = restore(args.base, snap, args.token)
+        res = restore(args.base, snap, token)
         print(f"restored {res['restored']} case(s), cleared {res['cleared']} — {describe(snap)}")
     else:
-        res = reset(args.base, args.token, args.case or None)
+        res = reset(args.base, token, args.case or None)
         print(f"reset: cleared {res['cleared']} case(s) (scope: {res['scope']})")
     return 0
 
