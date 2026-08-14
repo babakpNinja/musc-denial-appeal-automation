@@ -226,14 +226,41 @@ def parse_sections(text: str) -> dict:
 # --------------------------------------------------------------------------- render
 
 
-def build_letter(rec: dict, drafted: dict) -> dict:
+def letter_date_for(con: sqlite3.Connection) -> str:
+    """The date the letters carry: the day this board's data was built.
+
+    Not ``date.today()``. A re-render has to be a pure function of the data —
+    ``letterhead`` goes to some trouble for that — and a clock in the header
+    undoes all of it: every letter came out with different bytes every day, so
+    the deploy mirror reported all 86 as undeployed forever and ``demoready``
+    said BEHIND on a demo no push could make current for more than 24 hours
+    (#188).
+
+    ``meta.built_at`` is the right anchor rather than the appeal's own
+    ``generated_at``: it is re-written by every rebuild, so the letters go on
+    ageing with the board instead of freezing on the day the drafts were first
+    cached, and it is identical for every letter in one build.
+    """
+    row = con.execute("SELECT value FROM meta WHERE key = 'built_at'").fetchone()
+    built = row[0] if row else None
+    if not built:
+        # A DB from before the meta table (app.py:144 serves nulls for the same
+        # case). Falling back to the clock reinstates the churn, so say so
+        # rather than letting a mystery re-render explain itself later.
+        sys.stderr.write("generate_letters: no meta.built_at — dating the letters today, "
+                         "which makes this render depend on the clock\n")
+        return date.today().strftime("%B %d, %Y")
+    return date.fromisoformat(built).strftime("%B %d, %Y")
+
+
+def build_letter(rec: dict, drafted: dict, letter_date: str) -> dict:
     d, c, p, pay = rec["denial"], rec["claim"], rec["patient"], rec["payer"]
     cov = rec["coverage"]
     sections = [(s.get("heading", ""), s.get("text", "")) for s in drafted.get("sections", [])]
     return {
         "payer_name": pay["name"],
         "payer_address": PAYER_ADDRESSES.get(pay["payer_id"], ["Provider Appeals Department"]),
-        "letter_date": date.today().strftime("%B %d, %Y"),
+        "letter_date": letter_date,
         "subject": f"Formal Appeal of Claim Denial — {p['full_name']} (MRN {p['mrn']}), Claim {c['claim_id']}",
         "meta_rows": [
             ("Patient", f"{p['full_name']}  (DOB {p['birth_date']})"),
@@ -291,7 +318,7 @@ def generate_one(denial_id: str, *, force: bool = False, model: str = MODEL,
         else:
             drafted, _ = call_model(prompt_for(rec), model)
             model_used = resolve_model(model)
-        letter = build_letter(rec, drafted)
+        letter = build_letter(rec, drafted, letter_date_for(con))
         pdf = LETTERS / f"{denial_id}.pdf"
         render_letter(pdf, letter)
         if pdf.stat().st_size < 4000:
