@@ -189,12 +189,100 @@ def test_robots_asks_crawlers_to_stay_out(client):
 # a deliberate second edit, here.
 NOINDEX = "noindex, nofollow"
 
+#: A segment no route matches, so the response is written by whoever writes this
+#: app's 404s — asked at the root and once under each mount, because a
+#: `StaticFiles` mount is a separate ASGI app and answers its own (#478).
+PROBE = "/ninja-noindex-probe-no-such-path"
+
+APP_SRC = (APP_DIR / "app.py").read_text()
+
+#: The routing table, read out of the source rather than off the application
+#: object. These paths are *subjects*, not expected values, and the declaration
+#: they come from grows on its own — but importing `app` here would hand a live
+#: run this box's application to answer with, which is the one thing this module
+#: is careful not to have (#368). A regex over the decorators costs no import.
+ROUTE = re.compile(r"^@app\.(?:get|post|put|patch|delete)\(\s*[\"']([^\"']+)[\"']", re.M)
+#: …and its oracle. A decorator this cannot read — a path built from a variable,
+#: a router included from another module — would leave a route unasked while
+#: saying nothing, which is the failure one level up from the one being fixed.
+DECORATOR = re.compile(r"^@app\.(?:get|post|put|patch|delete)\(", re.M)
+MOUNT = re.compile(r"^app\.mount\(\s*[\"']([^\"']+)[\"']", re.M)
+#: FastAPI's own docs route, declared in the `FastAPI(...)` call and written by
+#: somebody else entirely — exactly the kind of route that inherits a middleware
+#: or does not.
+DOCS = re.compile(r"docs_url\s*=\s*[\"']([^\"']+)[\"']")
+
+#: The one path parameter these routes use, filled from this box's database —
+#: the same stance the rest of the file takes, where local data is the
+#: expectation the deploy is measured against. A route that grows a *new*
+#: parameter is not silently dropped: `test_every_declared_route_can_be_asked`.
+FILLABLE = {"denial_id": ALL_DENIALS[0]["denial_id"]}
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def declared_routes() -> list[str]:
+    """Every path app.py declares a route for, in source order."""
+    paths = ROUTE.findall(APP_SRC)
+    assert len(paths) == len(DECORATOR.findall(APP_SRC)), (
+        "a route decorator in app.py declares its path in a way this regex cannot read, so "
+        "that route would drop out of the noindex subjects below with nothing saying so — "
+        "teach the regex, or the list has quietly gone back to being hand-written")
+    return paths
+
+
+def unfillable_routes() -> list[str]:
+    """Declared paths whose parameters nothing here knows a good value for."""
+    return [p for p in declared_routes()
+            if any(name not in FILLABLE for name in PLACEHOLDER.findall(p))]
+
+
+def noindex_subjects() -> list[str]:
+    """Every path worth asking for the header, derived rather than listed.
+
+    Three sources, none of them typed out here:
+
+    * the routing table, with `{denial_id}` filled from the DB — including the
+      POST routes, which are asked with GET on purpose. That 405 is written by
+      Starlette's router rather than by any handler in this app, and it is a
+      response a crawler can be holding. GET is also the only safe way to ask:
+      a POST here would reset a live demo board.
+    * one real file and one unrouted path under each `app.mount` prefix, because
+      a mount is a separate ASGI app. That the middleware wraps it is a fact
+      about how Starlette composes them, and `/` cannot demonstrate it.
+    * the root probe.
+
+    What it replaces is a list of five paths somebody imagined (#479): the
+    letters, the zip, the assets mount and every POST exit went unasked, and
+    nothing made adding a route add it here.
+    """
+    paths = [PROBE]
+    unfillable = unfillable_routes()
+    for path in declared_routes():
+        if path in unfillable:
+            continue                    # its own test complains; this one cannot ask it
+        paths.append(PLACEHOLDER.sub(lambda m: FILLABLE[m.group(1)], path))
+    for prefix in MOUNT.findall(APP_SRC):
+        served = APP_DIR / prefix.strip("/")
+        files = sorted(f for f in served.rglob("*") if f.is_file()) if served.is_dir() else []
+        assert files, (
+            f"app.py mounts {prefix} but {served} holds no files, so the mount would be "
+            f"asked nothing but its 404 — the convention read here is that a mount's "
+            f"prefix names the directory beside app.py")
+        paths.append(f"{prefix.rstrip('/')}/{files[0].relative_to(served).as_posix()}")
+        paths.append(f"{prefix.rstrip('/')}{PROBE}")
+    paths.extend(DOCS.findall(APP_SRC))
+    return sorted(dict.fromkeys(paths))
+
+
+#: Computed once at import, so `--collect-only` shows what is being asked — which
+#: is how anyone checks that the route they added today is in the list.
+NOINDEX_SUBJECTS = noindex_subjects()
+
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("path", ["/", "/robots.txt", "/api/stats", "/static/index.html",
-                                  "/api/cases/DEN-does-not-exist"])
+@pytest.mark.parametrize("path", NOINDEX_SUBJECTS)
 def test_every_response_carries_the_noindex_header(client, path):
-    """Including the 404 and the static mount, which no robots.txt line retracts.
+    """Including the 404s, the 405s, the mounts and the payloads.
 
     Parametrised across the kinds of response the app makes rather than one
     happy path: the header is set by middleware, and middleware that stopped
@@ -204,12 +292,54 @@ def test_every_response_carries_the_noindex_header(client, path):
     crawler, so `googlebot: noindex` contains the word while telling every other
     crawler nothing at all. The gate stopped reading it as a substring in #472;
     this suite kept doing it until #474.
+
+    Streamed and never read: `/letters.zip` is 5.8MB of PDFs and this asks only
+    what the response says about itself. Still a GET — a HEAD is a different
+    request, and a header that rides on one and not the other is exactly the
+    gap not to introduce into the check that looks for it.
     """
-    got = client.get(path).headers.get("x-robots-tag", "")
+    with client.stream("GET", path) as r:
+        got = r.headers.get("x-robots-tag", "")
     assert got == NOINDEX, (
         f"{path} came back with X-Robots-Tag {got!r}, not {NOINDEX!r}, so anything that "
         f"reached it without reading robots.txt may be free to index a page of "
         f"patient-shaped data")
+
+
+def test_every_declared_route_can_be_asked():
+    """The other half of a derived list: what the derivation left out.
+
+    A filter lets a case leave the world silently — a route that grows a path
+    parameter nothing here can fill would simply stop being asked, and the suite
+    would go green with fewer questions. So the leftovers are their own
+    complaint, and the two sets partition the routing table.
+
+    No `smoke`: it reads app.py off this box, and pointed at a URL it would
+    still be reading app.py off this box.
+    """
+    unfillable = unfillable_routes()
+    assert not unfillable, (
+        f"{unfillable} declare a path parameter with no known-good value in FILLABLE, so "
+        f"nothing asks them for the noindex header — add one, the way `denial_id` is "
+        f"filled from the database")
+
+
+def test_the_derived_subjects_cover_more_than_the_list_they_replaced():
+    """A floor, because a derivation that quietly returns [] is a green suite.
+
+    The paths below are the hand-written list this replaced (#479), spelled out
+    one last time as the thing the derivation has to beat: if a regex stops
+    matching or a mount is renamed, the subject list shrinks back towards them,
+    and this says so instead of the parametrise silently getting shorter.
+    """
+    was = ["/", "/robots.txt", "/api/stats", "/static/index.html"]
+    missing = [p for p in was if p not in NOINDEX_SUBJECTS]
+    assert not missing, f"the derived subjects dropped {missing}, which the old list asked"
+    assert len(NOINDEX_SUBJECTS) > len(was) + 1, (
+        f"only {len(NOINDEX_SUBJECTS)} subjects were derived from app.py — no better than "
+        f"the five that were typed out by hand, so the derivation has stopped working")
+    mounted = [p for p in NOINDEX_SUBJECTS if p.endswith(PROBE) and p != PROBE]
+    assert mounted, "no mount is asked what it does with a path it has no route for (#478)"
 
 
 @pytest.mark.smoke
