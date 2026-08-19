@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -153,6 +154,24 @@ def test_health_says_how_old_the_shipped_data_is(client):
     body = client.get("/api/health").json()
     assert body["built_at"], "shipped DB has no meta.built_at — run build_db.py --stamp"
     assert body["built_days_ago"] >= 0
+
+
+@pytest.mark.smoke
+def test_health_says_how_long_this_process_has_been_running(client):
+    """Everything else here describes the *build*, and a build survives a crash.
+
+    A process that died and was restarted seconds ago serves the same revision,
+    the same DB and the same built_at, so every other number above says "fine"
+    (#486 was exactly that, in the other demo). This one moves, which is what
+    lets tomorrow's check notice a restart it slept through (#487) — so it is
+    asserted the only way that proves it is the process's own clock and not a
+    constant: read it twice and watch it grow.
+    """
+    first = client.get("/api/health").json()["uptime_s"]
+    assert isinstance(first, (int, float)) and first >= 0, f"got {first!r}"
+    time.sleep(0.3)
+    second = client.get("/api/health").json()["uptime_s"]
+    assert second > first, f"uptime_s did not move across a 0.3s sleep: {first} -> {second}"
 
 
 @pytest.mark.smoke

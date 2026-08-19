@@ -7,6 +7,7 @@ import hmac
 import io
 import os
 import sqlite3
+import time
 import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -181,6 +182,25 @@ def build_info() -> dict:
     return {"built_at": built, "built_days_ago": age}
 
 
+#: when *this process* started, read from a clock that a container's wall time
+#: cannot argue with. The health payload's other numbers all describe the build;
+#: none of them changes when the process dies and Railway starts another one,
+#: which is how a crash any scanner could trigger stayed invisible for the life
+#: of a deploy (#486, #487). Module scope on purpose: it is set once at import,
+#: so it dates the process and not the request.
+STARTED = time.monotonic()
+
+
+def uptime_s() -> float:
+    """Seconds this process has been running, to a tenth.
+
+    Tenths rather than whole seconds because the test that proves the number is
+    alive reads it twice — at whole seconds, two reads a fraction apart are
+    equal and the assertion has to sleep for a second to say anything.
+    """
+    return round(time.monotonic() - STARTED, 1)
+
+
 def revision() -> str | None:
     """Which commit is actually serving — Railway injects it at deploy time.
 
@@ -212,6 +232,7 @@ def health():
             " (SELECT COUNT(*) FROM appeals) appeals")
     orphans = orphan_letters()
     return {"status": "ok", **n, **build_info(), "revision": revision(),
+            "uptime_s": uptime_s(),
             "letters_on_disk": len(list(LETTERS.glob("DEN-*.pdf"))),
             "orphan_letters": len(orphans), "orphan_letter_ids": orphans[:10]}
 
