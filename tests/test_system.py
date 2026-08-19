@@ -9,22 +9,30 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import sys
 from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
-from fastapi.testclient import TestClient
 
 APP_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(APP_DIR))
 
-import app as webapp  # noqa: E402
+# No `import app` here any more. The nine smoke tests below must not be able to
+# reach the application object at all — reaching it is how a live run ends up
+# answering itself. What is left of the module's local knowledge is `DB` and the
+# PDFs, which are the *expectation* the deploy is measured against.
 
 DB = APP_DIR / "data" / "musc_appeals.db"
 LETTERS = APP_DIR / "letters"
 
-client = TestClient(webapp.app)
+# The HTTP tests below take `client` from conftest instead of a module-level
+# `TestClient(webapp.app)`. The fixture is the in-process client with no
+# `--base-url` and a real socket with one, and that is the whole point: a smoke
+# test holding a module-level in-process client would go green against a deploy
+# it never contacted (#368).
+#
+# `ALL_DENIALS` stays local on purpose. Pointed at a URL, every `== len(ALL_DENIALS)`
+# below becomes "does the deploy hold the database this workspace is about to
+# ship" — which is the question a shipped-the-old-DB failure answers no to.
 
 
 def rows(sql, params=()):
@@ -126,7 +134,8 @@ def test_stored_draft_allows_offline_rerender():
 
 # ----------------------------------------------------------------- api / ui
 
-def test_health():
+@pytest.mark.smoke
+def test_health(client):
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
     assert body["letters_on_disk"] >= body["denials"]
@@ -137,7 +146,8 @@ def test_health():
         "generate_letters.py --prune-orphans")
 
 
-def test_health_says_how_old_the_shipped_data_is():
+@pytest.mark.smoke
+def test_health_says_how_old_the_shipped_data_is(client):
     """The deployed board has to be able to answer "how old are you?" itself —
     otherwise the only way to know is to rebuild it locally and diff."""
     body = client.get("/api/health").json()
@@ -145,14 +155,16 @@ def test_health_says_how_old_the_shipped_data_is():
     assert body["built_days_ago"] >= 0
 
 
-def test_index_renders():
+@pytest.mark.smoke
+def test_index_renders(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "Denial Appeal Automation" in r.text
     assert "synthetic" in r.text.lower()
 
 
-def test_stats_endpoint():
+@pytest.mark.smoke
+def test_stats_endpoint(client):
     s = client.get("/api/stats").json()
     assert s["totals"]["denials"] == len(ALL_DENIALS)
     assert s["totals"]["denied_total"] > 0
@@ -161,7 +173,8 @@ def test_stats_endpoint():
     assert abs(sum(p["denied_amount"] for p in s["by_payer"]) - s["totals"]["denied_total"]) < 1
 
 
-def test_cases_list_and_filters():
+@pytest.mark.smoke
+def test_cases_list_and_filters(client):
     all_cases = client.get("/api/cases").json()
     assert len(all_cases) == len(ALL_DENIALS)
     assert all(c["letter_path"] for c in all_cases), "every case must expose a letter"
@@ -177,7 +190,8 @@ def test_cases_list_and_filters():
     assert empty == []
 
 
-def test_case_detail_has_clinical_context_and_portal():
+@pytest.mark.smoke
+def test_case_detail_has_clinical_context_and_portal(client):
     d = ALL_DENIALS[0]["denial_id"]
     c = client.get(f"/api/cases/{d}").json()
     assert c["denial_id"] == d
@@ -189,7 +203,8 @@ def test_case_detail_has_clinical_context_and_portal():
     assert client.get("/api/cases/DEN-does-not-exist").status_code == 404
 
 
-def test_pdf_download_endpoint():
+@pytest.mark.smoke
+def test_pdf_download_endpoint(client):
     d = ALL_DENIALS[0]["denial_id"]
     r = client.get(f"/letters/{d}.pdf?download=1")
     assert r.status_code == 200
@@ -198,7 +213,8 @@ def test_pdf_download_endpoint():
     assert client.get("/letters/DEN-nope.pdf").status_code == 404
 
 
-def test_bulk_zip_contains_every_letter():
+@pytest.mark.smoke
+def test_bulk_zip_contains_every_letter(client):
     import io
     import zipfile
     r = client.get("/letters.zip")
@@ -208,7 +224,8 @@ def test_bulk_zip_contains_every_letter():
         assert all(n.endswith(".pdf") for n in z.namelist())
 
 
-def test_payers_endpoint_totals_match():
+@pytest.mark.smoke
+def test_payers_endpoint_totals_match(client):
     payers = client.get("/api/payers").json()
     assert sum(p["denials"] for p in payers) == len(ALL_DENIALS)
     assert all(p["appeal_url"] or p["portal_url"] for p in payers)
