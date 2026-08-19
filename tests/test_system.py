@@ -183,6 +183,13 @@ def test_robots_asks_crawlers_to_stay_out(client):
         f"handed anything but text/plain reads it as absent — crawl everything")
 
 
+# Spelled out here rather than imported from app.py on purpose: a test that reads
+# the value from the code it is checking agrees with any value that code grows
+# next, including one that protects nobody. Changing the app's header should cost
+# a deliberate second edit, here.
+NOINDEX = "noindex, nofollow"
+
+
 @pytest.mark.smoke
 @pytest.mark.parametrize("path", ["/", "/robots.txt", "/api/stats", "/static/index.html",
                                   "/api/cases/DEN-does-not-exist"])
@@ -192,11 +199,17 @@ def test_every_response_carries_the_noindex_header(client, path):
     Parametrised across the kinds of response the app makes rather than one
     happy path: the header is set by middleware, and middleware that stopped
     wrapping a mount or an error would still look right at `/`.
+
+    The whole value, not `"noindex" in got`: X-Robots-Tag may be scoped to one
+    crawler, so `googlebot: noindex` contains the word while telling every other
+    crawler nothing at all. The gate stopped reading it as a substring in #472;
+    this suite kept doing it until #474.
     """
     got = client.get(path).headers.get("x-robots-tag", "")
-    assert "noindex" in got, (
-        f"{path} came back with X-Robots-Tag {got!r}, so anything that reached it "
-        f"without reading robots.txt is free to index a page of patient-shaped data")
+    assert got == NOINDEX, (
+        f"{path} came back with X-Robots-Tag {got!r}, not {NOINDEX!r}, so anything that "
+        f"reached it without reading robots.txt may be free to index a page of "
+        f"patient-shaped data")
 
 
 @pytest.mark.smoke
