@@ -12,7 +12,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).parent
@@ -21,6 +22,33 @@ LETTERS = HERE / "letters"
 ASSETS = HERE / "assets"
 
 app = FastAPI(title="MUSC Appeal Automation", docs_url="/api/docs", redoc_url=None)
+
+
+# ------------------------------------------------------------------- crawlers
+# This is a demo built on synthetic patient data and it should not turn up in a
+# search result. It had nothing at all to say about that until #461: no
+# robots.txt (the live URL 404'd for it), and no header either.
+#
+# Both, because they fail in different places. The file is what a well-behaved
+# crawler asks for first — and is only obeyed if it comes back as text/plain,
+# which is how the game's `Disallow: /` sat there doing nothing for months
+# (#369). The header does not depend on a second request being made, parsed, or
+# typed correctly, and it rides on every response including the PDFs and the
+# zip, which no robots.txt line can retract once they are fetched.
+
+@app.middleware("http")
+async def ask_not_to_be_indexed(request, call_next):
+    """`noindex` on every response, set in one place so a new route inherits it."""
+    response = await call_next(request)
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots() -> str:
+    return "# Synthetic-data demo. Please do not index it.\nUser-agent: *\nDisallow: /\n"
+
+
 app.mount("/assets", StaticFiles(directory=str(ASSETS)), name="assets")
 
 

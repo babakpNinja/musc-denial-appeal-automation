@@ -163,6 +163,42 @@ def test_index_renders(client):
     assert "synthetic" in r.text.lower()
 
 
+# --- keeping a synthetic-data demo out of search results (#461) --------------
+# Until this issue the app had nothing to say on the subject: the live URL 404'd
+# for robots.txt, and no response carried a header. Two facts, so two tests —
+# the file is what a crawler asks for, the header is what reaches it when it did
+# not ask, or asked and was handed the wrong content type, which is exactly how
+# the game's `Disallow: /` sat there doing nothing for months (#369).
+
+@pytest.mark.smoke
+def test_robots_asks_crawlers_to_stay_out(client):
+    r = client.get("/robots.txt")
+    assert r.status_code == 200, "no robots.txt is served at all"
+    assert "Disallow: /" in r.text, f"robots.txt does not disallow anything: {r.text!r}"
+    # Google treats a robots.txt of any other type as no robots.txt at all, so
+    # this half is not decoration: it is the difference between the line above
+    # being obeyed and being skipped.
+    assert r.headers["content-type"].startswith("text/plain"), (
+        f"robots.txt is served as {r.headers['content-type']!r}, and a crawler "
+        f"handed anything but text/plain reads it as absent — crawl everything")
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("path", ["/", "/robots.txt", "/api/stats", "/static/index.html",
+                                  "/api/cases/DEN-does-not-exist"])
+def test_every_response_carries_the_noindex_header(client, path):
+    """Including the 404 and the static mount, which no robots.txt line retracts.
+
+    Parametrised across the kinds of response the app makes rather than one
+    happy path: the header is set by middleware, and middleware that stopped
+    wrapping a mount or an error would still look right at `/`.
+    """
+    got = client.get(path).headers.get("x-robots-tag", "")
+    assert "noindex" in got, (
+        f"{path} came back with X-Robots-Tag {got!r}, so anything that reached it "
+        f"without reading robots.txt is free to index a page of patient-shaped data")
+
+
 @pytest.mark.smoke
 def test_stats_endpoint(client):
     s = client.get("/api/stats").json()
