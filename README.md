@@ -275,7 +275,11 @@ model spend), runs the suite, and **aborts without pushing if anything fails**, 
 rebuild — letters included, since `git checkout` cannot restore untracked PDFs the prune deleted, so
 the revert re-renders them from the restored drafts. A rebuild rewrites the
 whole DB whether or not the board moved, so "the files changed" is not the signal to deploy:
-it ships only once the timeline has drifted 21 days or more than 12 cases have lapsed.
+it ships only once the timeline has drifted 21 days or more than 12 cases have lapsed
+(`REFRESH_LAPSED`). That is deliberately *below* the count at which `demoready` calls the board
+stale — 20 % of the queue, the same bound this README claims above and `tests/test_plausibility.py`
+asserts — so the refresh starts about six days before the demo would be embarrassing rather than
+at the moment it already is (#506).
 After pushing it waits for the *new* container to actually serve the new deadlines before
 touching workflow state — and only replays the snapshot if the deploy lost it. Finally it
 runs `tools/uptime.py musc-appeals` (Chromium render check included) and **fails the run if

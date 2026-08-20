@@ -20,7 +20,7 @@ import urllib.request
 
 import demo_state
 from html_tags import A, IMG, LINK, fetched, tags_in
-from refresh_demo import MAX_LAPSED
+from refresh_demo import max_lapsed
 
 TIMEOUT = 30
 READY, STALE, DIRTY, DOWN = "READY", "STALE", "DIRTY", "DOWN"
@@ -104,7 +104,12 @@ def freshness(base: str) -> dict:
     left = [c.get("days_to_deadline") for c in cases if c.get("days_to_deadline") is not None]
     lapsed = sum(1 for d in left if d <= 0)
     appealable = sum(1 for d in left if d > 0)
-    stale = lapsed > MAX_LAPSED
+    # Derived from the board in front of us rather than from a constant (#506):
+    # 12 lapsed is a tired board of 86 and a healthy one of 200, and the constant
+    # could not tell those apart. Counted over `left`, the cases that *have* a
+    # deadline, which is the same population `lapsed` comes from and the same one
+    # tests/test_plausibility.py bounds.
+    stale = lapsed > max_lapsed(len(left))
     age = build_age(base)
     # the age is what a human actually asks ("how old is this thing?"); the
     # lapsed count is what makes it embarrassing, so that still sets the verdict

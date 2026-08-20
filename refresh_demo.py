@@ -16,7 +16,7 @@ says how many it dropped — see ``prune_letters``.
 
 Safe to run often: a rebuild rewrites the DB and re-renders every letter (they
 cite dates), so "files changed" is not the signal — the run only pushes once the
-timeline has drifted ``--min-drift-days`` or more than ``--max-lapsed`` cases have run past
+timeline has drifted ``--min-drift-days`` or more than ``--refresh-lapsed`` cases have run past
 their deadline. It asks the live ``/api/health`` how old the deployed data is
 before rebuilding anything, so a fresh board costs one request, not a rebuild. Any
 failing test aborts before anything is pushed. After the push it waits — via
@@ -48,8 +48,34 @@ LIVE = "https://musc-appeals-production.up.railway.app"
 # rendered by the mirror's prepare step, so git could neither report nor revert them.
 SHIPPED = ("data/musc_appeals.db", "data/letter_drafts.json")
 MIN_DRIFT_DAYS = 21     # below this the board still looks live; do not churn the deploy
-MAX_LAPSED = 12         # …unless this many cases have already run past their deadline
 UPTIME_TARGET = "musc-appeals"   # the name in tools/uptime_targets.json
+
+# When the board stops being what it claims to be (#506). The README says the queue
+# is "~80% still appealable", and tests/test_plausibility.py asserts the same floor
+# from the other side — `lapsed <= len(cases) * 0.20`. So this is not a new opinion
+# about how rotten is too rotten: it is that rule, read as a bound, in the same
+# expression so the two cannot drift apart. demoready_hooks imports it from here.
+LAPSED_CEILING = 0.20
+
+# When to *repair* it, which is deliberately not the same number. Until #506 the
+# push trigger and demoready's alarm were both 12: the refresher only started work
+# at the instant the board went red, so a perfect cron still left a red window and
+# a single missed run left a red demo. A repair threshold below the alarm is what
+# turns missed refreshes into slack instead of into a symptom. On the shipped board
+# this fires ~6 days before the alarm; test_bootstrap asserts that gap from the DB,
+# because it is a property of the generated deadline distribution and moves on
+# every rebuild.
+REFRESH_LAPSED = 12
+
+
+def max_lapsed(total: int) -> int:
+    """The most lapsed cases a board of `total` can carry and still be plausible.
+
+    A count, not a fraction, because that is what both callers already count; but
+    derived from `total`, because 12-of-86 and 12-of-200 are not the same board and
+    the old constant could not tell them apart.
+    """
+    return int(total * LAPSED_CEILING)
 
 
 def run(cmd: list[str], cwd: Path = HERE, timeout: int = 1800) -> subprocess.CompletedProcess:
@@ -190,7 +216,7 @@ def verify_live(target: str = UPTIME_TARGET) -> tuple[bool, list[str]]:
 
 
 def refresh(base: str, token: str, dry_run: bool, commit: bool,
-            min_drift: int = MIN_DRIFT_DAYS, max_lapsed: int = MAX_LAPSED) -> dict:
+            min_drift: int = MIN_DRIFT_DAYS, push_at_lapsed: int = REFRESH_LAPSED) -> dict:
     out: dict = {"before": board_health(), "pushed": False, "restored": 0, "dry_run": dry_run}
 
     # Cheapest gate first: ask the live app how old its data is. A board that is
@@ -199,11 +225,11 @@ def refresh(base: str, token: str, dry_run: bool, commit: bool,
     # through to the rebuild, which measures drift the expensive but sure way.
     if not dry_run:
         out["live_build_age"] = age = live_build_age(base)
-        if age is not None and age < min_drift and out["before"]["lapsed"] <= max_lapsed:
+        if age is not None and age < min_drift and out["before"]["lapsed"] <= push_at_lapsed:
             return {**out, "ok": True, "drift_days": age,
                     "note": (f"skipped without rebuilding: live data is {age}d old and "
                              f"{out['before']['lapsed']} case(s) lapsed — pushes at {min_drift}d "
-                             f"or >{max_lapsed} lapsed")}
+                             f"or >{push_at_lapsed} lapsed")}
 
     was = deadlines()
 
@@ -237,12 +263,12 @@ def refresh(base: str, token: str, dry_run: bool, commit: bool,
 
     # a rebuild rewrites the whole DB whether or not the board moved, so "the
     # files changed" is not a reason to ship — only a board that has visibly aged is.
-    stale = drift >= min_drift or out["before"]["lapsed"] > max_lapsed
+    stale = drift >= min_drift or out["before"]["lapsed"] > push_at_lapsed
     if dry_run or not stale:
         revert_rebuild()
         note = (f"dry run: rebuilt, tested and reverted (drift {drift}d)" if dry_run else
                 f"skipped: only {drift}d of drift and {out['before']['lapsed']} lapsed case(s) "
-                f"— pushes at {min_drift}d or >{max_lapsed} lapsed")
+                f"— pushes at {min_drift}d or >{push_at_lapsed} lapsed")
         return {**out, "ok": True, "note": note}
 
     if commit:
@@ -316,8 +342,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--min-drift-days", type=int, default=MIN_DRIFT_DAYS,
                     help=f"days of timeline drift before a push is worth it (default {MIN_DRIFT_DAYS})")
-    ap.add_argument("--max-lapsed", type=int, default=MAX_LAPSED,
-                    help=f"lapsed cases that force a push regardless of drift (default {MAX_LAPSED})")
+    ap.add_argument("--refresh-lapsed", "--max-lapsed", type=int, default=REFRESH_LAPSED,
+                    dest="refresh_lapsed",
+                    help=f"lapsed cases that force a push regardless of drift (default "
+                         f"{REFRESH_LAPSED}). Not demoready's alarm, which is higher and "
+                         f"derived from the board size — see max_lapsed()")
     ap.add_argument("--force", action="store_true", help="push even if the board is still fresh")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
@@ -331,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     res = refresh(args.base, token, args.dry_run, not args.no_commit,
-                  0 if args.force else args.min_drift_days, args.max_lapsed)
+                  0 if args.force else args.min_drift_days, args.refresh_lapsed)
     print(json.dumps(res, indent=2) if args.json else summarise(res))
     return 0 if res.get("ok") else 1
 

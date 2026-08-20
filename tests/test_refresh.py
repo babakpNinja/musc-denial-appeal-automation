@@ -154,6 +154,52 @@ def test_too_many_lapsed_cases_force_a_push_before_the_drift_threshold(rig, monk
     assert run.ran("mirror.py")
 
 
+def test_the_refresher_starts_work_before_the_board_is_embarrassing(rig, monkeypatch):
+    """The push trigger is deliberately below demoready's alarm (#506).
+
+    Both were 12: the refresher pushed at `lapsed > 12` and demoready called the
+    board STALE at `lapsed > 12`, so the repair only began at the instant the demo
+    went red. A perfect cron still left a red window the length of a rebuild, and
+    one missed run left a red demo. Fed a count that is over the trigger and under
+    the alarm, the refresher must push anyway — that gap *is* the tolerance.
+    """
+    over = rd.REFRESH_LAPSED + 1
+    assert over <= rd.max_lapsed(67), (
+        f"{over} lapsed is already red on a 67-case board, so this fixture cannot "
+        f"tell 'repairs early' from 'repairs at the alarm'")
+    run = rig(drift=1, lapsed=over)                    # a board built yesterday
+    snapshots(monkeypatch, [])
+    assert rd.refresh("http://x", "t", dry_run=False, commit=True)["pushed"]
+    assert run.ran("mirror.py")
+
+
+def test_a_board_at_the_trigger_is_not_yet_worth_a_rebuild(rig, monkeypatch):
+    """The other side of the boundary: `>` and not `>=`, so the count has to move.
+
+    Without this the trigger could drift down to zero — every board has some lapsed
+    cases — and the refresher would push on every run, which is a rebuild and a
+    deploy of a board nobody is complaining about.
+    """
+    run = rig(drift=1, lapsed=rd.REFRESH_LAPSED)
+    snapshots(monkeypatch, [])          # so a push that should not happen fails as an
+    res = rd.refresh("http://x", "t", dry_run=False, commit=True)   # assertion, not a DNS error
+    assert res["ok"] and not res["pushed"] and "skipped" in res["note"]
+    assert not run.ran("mirror.py")
+
+
+def test_the_push_trigger_is_tunable_without_touching_the_alarm(rig, monkeypatch):
+    """`--refresh-lapsed` moves when the repair starts, not when the demo is red.
+
+    They were one flag (`--max-lapsed`) reaching one constant, so lowering the
+    trigger for a noisy week also raised the bar demoready judged the board by.
+    """
+    run = rig(drift=1, lapsed=3)
+    snapshots(monkeypatch, [])
+    assert rd.refresh("http://x", "t", dry_run=False, commit=True,
+                      push_at_lapsed=2)["pushed"]
+    assert run.ran("mirror.py")
+
+
 def test_a_fresh_live_board_is_left_alone_without_paying_for_a_rebuild(rig, monkeypatch):
     """/api/health already knows the age; rebuilding to learn it costs a full re-render."""
     run = rig(drift=6)
