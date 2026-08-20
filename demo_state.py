@@ -11,13 +11,18 @@ demo: take a snapshot first, do the smoke test, restore.
     python demo_state.py reset    --base https://…            # all back to ready
     python demo_state.py show     --base https://…            # what is non-ready now
     python demo_state.py prune    --base https://…            # drop rows for deleted cases
+    python demo_state.py drill    --base https://… --run "<cmd>" --expect DIRTY
 
-``snapshot`` and ``show`` are read-only. ``restore``, ``reset`` and ``prune`` call
-``POST /api/workflow/…``, which only exists when the deployment has
+``snapshot`` and ``show`` are read-only. ``restore``, ``reset``, ``prune`` and
+``drill`` call ``POST /api/workflow/…``, which only exists when the deployment has
 ``DEMO_ADMIN_TOKEN`` set; pass the same value with ``--token``, in the
 ``DEMO_ADMIN_TOKEN`` environment variable, or leave it to be read from the agent
 box's gitignored ``.env.demo`` (``python tools/bootstrap.py`` puts that file back
 from the Railway service after a re-provision).
+
+``drill`` is the four steps above done as one thing that cannot forget the last
+one: snapshot, move one case, run a command against the dirtied board, put the
+board back in a ``finally``, and prove it came back. See :func:`drill` (#30).
 """
 
 from __future__ import annotations
@@ -25,6 +30,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import signal
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -99,6 +107,19 @@ def api(base: str, path: str, payload: dict | None = None, token: str | None = N
         raise SystemExit(f"{url} -> HTTP {exc.code}: {body}")
 
 
+def moved(case: dict) -> bool:
+    """Has this case been touched, i.e. is it not in a fresh board's default state?
+
+    One author for the question, because two things ask it and they must agree: a
+    snapshot keeps exactly the cases this returns True for, and ``drill`` picks its
+    victim from the ones it returns False for. If those two drifted apart, the drill
+    would dirty a case the snapshot had already recorded as moved and the restore
+    would look like it had lost something.
+    """
+    return bool(case.get("appeal_status") != "ready" or case.get("status_note")
+                or case.get("submitted_at") or case.get("status_updated_at"))
+
+
 def snapshot(base: str) -> dict:
     """Every case that is not in its default state, with its timeline.
 
@@ -108,10 +129,8 @@ def snapshot(base: str) -> dict:
     """
     wf = api(base, "/api/workflow") or {}
     cases = api(base, "/api/cases?limit=1000")
-    moved = [c for c in cases if c.get("appeal_status") != "ready" or c.get("status_note")
-             or c.get("submitted_at") or c.get("status_updated_at")]
     rows = []
-    for c in moved:
+    for c in [c for c in cases if moved(c)]:
         detail = api(base, f"/api/cases/{c['denial_id']}/status")
         rows.append({
             "denial_id": c["denial_id"],
@@ -167,16 +186,180 @@ def describe(snap: dict) -> str:
     return f"{len(snap['cases'])} of {snap['cases_total']} cases moved: {parts}{tail}"
 
 
+# ------------------------------------------------------------------- the drill
+
+# What the drill leaves on the board for the seconds the command runs. ``submitted``
+# because that is the residue this whole file exists to undo — the case somebody
+# moved while smoke-testing and forgot — and because it is a legal forward
+# transition, so creating it needs no admin door and proves nothing about the token.
+DRILL_STATUS = "submitted"
+DRILL_NOTE = "DRILL — automated check, reverted immediately"
+
+# Exit codes, so a caller can tell the outcomes apart. 1 is deliberately not among
+# them: `main` already returns 1 for "refused before starting" (no token, no --run),
+# and the one outcome that needs somebody to go and look at a client's board must
+# not share a number with the most boring thing this file can do.
+OK, REFUSED, UNMET, RESIDUE = 0, 2, 3, 4
+
+
+def run_command(command: str, cwd: Path) -> tuple[int, str]:
+    """Run the command under drill; return ``(exit code, stdout + stderr)``.
+
+    Split with :func:`shlex.split` rather than handed to a shell, so a typo in the
+    command raises ``FileNotFoundError`` *here* — inside the ``try`` whose
+    ``finally`` puts the board back — instead of arriving as a shell's 127, which
+    the drill would then report as the monitor's own verdict.
+    """
+    proc = subprocess.run(shlex.split(command), cwd=str(cwd), capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def put_back(base: str, before: dict, token: str, cwd: Path) -> bool:
+    """Restore ``before`` and answer whether the board actually came back.
+
+    Never raises: this is what runs in the ``finally``, and an exception escaping
+    here would replace the "your client's board still has residue on it, here is
+    the command" message with a traceback.
+    """
+    try:
+        restore(base, before, token)
+        after = snapshot(base)
+        if after["cases"] == before["cases"]:
+            return True
+        why = f"the board came back different: {describe(after)}"
+    except (SystemExit, OSError, ValueError, KeyError) as exc:
+        why = f"the restore itself failed: {type(exc).__name__}: {exc}"
+
+    path = cwd / f"demo_state-residue-{before['taken_at'].replace(':', '')}.json"
+    try:
+        path.write_text(json.dumps(before, indent=2) + "\n")
+        saved = f"the board as it was found is written to {path}"
+    except OSError as exc:                       # last resort: the snapshot is the repair
+        saved = f"could not write the snapshot ({exc}); it is above, copy it out of this log"
+        sys.stderr.write(json.dumps(before, indent=2) + "\n")
+    sys.stderr.write(
+        f"RESIDUE LEFT ON {base} — {why}\n"
+        f"This is a client-facing board and it is not as this drill found it. {saved};\n"
+        "put it back by hand with:\n"
+        f"    python demo_state.py restore --base {base} -i {path}\n")
+    return False
+
+
+def drill(base: str, token: str, command: str, expect: list[str], cwd: Path) -> int:
+    """Dirty the live board, run a command against it, and always put it back.
+
+    Validating the sweep against the real board used to be five steps done by hand
+    on a *client-facing* demo, where forgetting the fifth leaves a case sitting in
+    ``submitted`` (#30). Here the fifth step is a ``finally``, and whether it worked
+    is checked rather than assumed — a drill that leaves residue is worse than no
+    drill, so that is the one thing that makes this exit non-zero on its own.
+
+    Three orderings do the safety work, and each is the answer to a way the hand
+    version could strand the board:
+
+    * **The token is resolved, and the admin door is tried, before anything moves.**
+      ``resolve_token`` returning a string does not mean the deployment accepts it;
+      a wrong value is a 403 that the hand version discovers *after* dirtying, with
+      no undo. So the drill first sends a ``reset`` scoped to the case it is about
+      to touch — a no-op on a case already at ``ready`` — and only dirties once that
+      has come back 200.
+    * **A board that is already dirty is refused, not drilled.** The verdict under
+      test is board-wide: a monitor answering DIRTY next to somebody else's residue
+      would answer DIRTY with the drill's own change removed, so the run would pass
+      without testing anything.
+    * **The command's exit code is reported, never inherited.** A monitor that
+      notices the dirt is *supposed* to fail — ``demoready_sweep`` returns 1 for a
+      non-READY demo — so adopting its code would mark a working drill as broken.
+      What the command said is judged by ``--expect`` instead, and when no
+      ``--expect`` is given the run says out loud that nothing read the output.
+    """
+    before = snapshot(base)
+    if before["cases"]:
+        sys.stderr.write(
+            f"refusing: the board is already dirty — {describe(before)}\n"
+            "A DIRTY verdict from here would be about that, not about this drill's own\n"
+            "change, and the run would pass with the drill removed. Clear it first:\n"
+            f"    python demo_state.py show  --base {base}\n"
+            f"    python demo_state.py reset --base {base}   # if that was a smoke test\n")
+        return REFUSED
+    cases = api(base, "/api/cases?limit=1000")
+    untouched = sorted(c["denial_id"] for c in cases if not moved(c))
+    if not untouched:
+        sys.stderr.write(f"refusing: {base} reports no case sitting at ready, so there is "
+                         "nothing this drill could dirty and then undo\n")
+        return REFUSED
+    victim = untouched[0]      # sorted, so a re-run drills the same case
+
+    reset(base, token, [victim])   # no-op on a ready case; proves the door and the token
+    print(f"undo proved: /api/workflow/reset took the token (no-op on {victim})", file=sys.stderr)
+
+    code, said, blew_up = None, "", ""
+    try:
+        api(base, f"/api/cases/{victim}/status", {"status": DRILL_STATUS, "note": DRILL_NOTE})
+        dirty = snapshot(base)
+        if [c["denial_id"] for c in dirty["cases"]] != [victim]:
+            blew_up = (f"the dirtying did not take: expected only {victim} to have moved, "
+                       f"the board says {describe(dirty)}")
+        else:
+            print(f"dirtied: {describe(dirty)}\nrunning in {cwd}: {command}", file=sys.stderr)
+            code, said = run_command(command, cwd)
+            if said:
+                # flushed: everything else here goes to stderr, which is unbuffered,
+                # so a piped run would otherwise print the command's own words last
+                print(said, end="" if said.endswith("\n") else "\n", flush=True)
+    except Exception as exc:                     # noqa: BLE001 — the board comes first
+        blew_up = f"the command could not be run: {type(exc).__name__}: {exc}"
+    finally:
+        clean = put_back(base, before, token, cwd)
+
+    if not clean:
+        return RESIDUE                           # loudest failure, whatever else happened
+    print(f"restored: the board is as it was found — {describe(before)}", file=sys.stderr)
+    if blew_up:
+        sys.stderr.write(f"drill did not complete: {blew_up}\n")
+        return UNMET
+    missing = [t for t in expect if t not in said]
+    if missing:
+        sys.stderr.write(f"the command exited {code} but never said "
+                         f"{', '.join(repr(t) for t in missing)} — it did not notice "
+                         "a board this drill had already dirtied\n")
+        return UNMET
+    if expect:
+        print(f"drill passed: the command exited {code} and said "
+              f"{', '.join(repr(t) for t in expect)} about a dirtied board", file=sys.stderr)
+    else:
+        print(f"the command exited {code}; nothing checked what it said — pass --expect "
+              "to make this a drill rather than a wrapper", file=sys.stderr)
+    return OK
+
+
+def die_on_sigterm() -> None:
+    """Turn SIGTERM into an exception, so the ``finally`` that restores still runs.
+
+    SIGINT already arrives as ``KeyboardInterrupt``. SIGTERM kills the interpreter
+    outright, which on this tool means walking away from a dirtied client board.
+    """
+    def raise_it(signum, frame):
+        raise KeyboardInterrupt("SIGTERM during drill — putting the board back")
+
+    signal.signal(signal.SIGTERM, raise_it)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=("snapshot", "restore", "reset", "show", "prune"))
+    ap.add_argument("command", choices=("snapshot", "restore", "reset", "show", "prune", "drill"))
     ap.add_argument("--base", default=os.environ.get("MUSC_BASE", DEFAULT_BASE))
     ap.add_argument("-o", "--out", help="snapshot: file to write (default stdout)")
     ap.add_argument("-i", "--in", dest="infile", help="restore: snapshot file to replay")
     ap.add_argument("--token", default="",
                     help="default: $DEMO_ADMIN_TOKEN, then the box's .env.demo")
     ap.add_argument("--case", action="append", default=[], help="reset: limit to these denial ids")
+    ap.add_argument("--run", help="drill: the command to run against the dirtied board")
+    ap.add_argument("--expect", action="append", default=[],
+                    help="drill: text the command's output must contain (repeatable)")
+    ap.add_argument("--cwd", default=str(Path(__file__).resolve().parent),
+                    help="drill: directory to run --run from (default: this file's)")
     args = ap.parse_args(argv)
 
     if args.command in ("snapshot", "show"):
@@ -204,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"pruned {res['pruned']} orphan case(s): {named} "
               f"({res['rows']} status row(s), {res['events']} event(s)); "
               f"{res['remaining']} orphan(s) left")
+    elif args.command == "drill":
+        if not args.run:
+            return int(bool(sys.stderr.write("drill needs --run '<command>'\n")))
+        die_on_sigterm()
+        return drill(args.base, token, args.run, args.expect, Path(args.cwd))
     elif args.command == "restore":
         if not args.infile:
             return int(bool(sys.stderr.write("restore needs -i <snapshot.json>\n")))

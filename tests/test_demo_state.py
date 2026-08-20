@@ -8,6 +8,9 @@ rewrite history the public API deliberately refuses to.
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -263,6 +266,248 @@ def test_describe_says_what_a_snapshot_holds(cli, client, ids):
     assert "1 submitted" in cli.describe(cli.snapshot("http://test"))
 
 
+# --------------------------------------------------------------- the drill (#30)
+# Validating a monitor against the real board is five hand steps on a client-facing
+# demo — snapshot, dirty, run, restore, re-verify — and forgetting the fourth leaves
+# a case sitting in `submitted` in front of the client. `drill` is those five as one
+# thing, so what these pin is mostly the *unhappy* halves: the command blowing up,
+# the token being wrong, the restore itself failing. A drill that leaves residue is
+# worse than no drill.
+
+
+@pytest.fixture()
+def watcher(cli, monkeypatch):
+    """Stand in for the command under drill, and record the board it ran against.
+
+    A real subprocess cannot see this in-memory board, so the fake is the honest
+    one here: it asks the same API the monitor would, at the moment the monitor
+    would, and hands back what it found.
+    """
+    seen = {"ran": 0}
+
+    def fake(command, cwd):
+        seen["ran"] += 1
+        seen["board"] = cli.describe(cli.snapshot("http://test"))
+        seen["cwd"] = cwd
+        return seen.get("code", 1), seen.get("says", "board state: DIRTY\n")
+
+    monkeypatch.setattr(demo_state, "run_command", fake)
+    return seen
+
+
+# The drill's exit codes, by their own names — so a wrong verdict fails as
+# `assert 'OK' == 'UNMET'` rather than as `assert 0 == 3`, which says nothing to
+# whoever reads it next (#482). The numbers come from the module, not from here.
+VERDICT = {demo_state.OK: "OK", demo_state.REFUSED: "REFUSED",
+           demo_state.UNMET: "UNMET", demo_state.RESIDUE: "RESIDUE"}
+
+
+@pytest.fixture()
+def run_drill(tmp_path):
+    """Run the drill, always from a scratch directory.
+
+    `--cwd` is where a restore that could not put the board back writes the snapshot
+    it is handing over, and under `mutate.py` the residue path fires in tests that
+    were not written for it — which dropped three `demo_state-residue-*.json` files
+    into the app directory before this defaulted. A test that wants to read that file
+    passes its own `--cwd`, and argparse lets the later flag win.
+    """
+    def run(*extra, base="http://test"):
+        return VERDICT[demo_state.main(
+            ["drill", "--base", base, "--run", "monitor", "--cwd", str(tmp_path), *extra])]
+
+    return run
+
+
+def test_the_command_runs_against_a_board_that_is_really_dirty(run_drill, watcher, cli, ids):
+    """The point of the whole thing: the monitor is asked about a board that has
+    something on it, not about the clean one it would have seen anyway."""
+    assert run_drill("--expect", "DIRTY") == "OK"
+    assert "1 submitted" in watcher["board"], \
+        f"the command was run against a board the drill had not dirtied: {watcher['board']}"
+    assert watcher["ran"] == 1
+
+
+def test_the_board_comes_back_to_exactly_what_was_there_before(run_drill, watcher, cli, client, ids):
+    assert run_drill("--expect", "DIRTY") == "OK"
+    after = cli.snapshot("http://test")
+    assert after["cases"] == [], f"the drill left {cli.describe(after)} on a client board"
+    # not merely "back at ready": the drill's own timeline entry is gone too, so the
+    # client's case history does not carry a note about an automated check
+    victim = sorted(c["denial_id"] for c in client.get("/api/cases?limit=1000").json())[0]
+    assert client.get(f"/api/cases/{victim}/status").json()["events"] == []
+
+
+def test_a_command_that_raises_still_puts_the_board_back(run_drill, cli, ids, monkeypatch, capsys):
+    """The failure the `finally` exists for. A typo in --run is a FileNotFoundError
+    out of subprocess, and the hand version of this step is where the case gets
+    stranded."""
+    def boom(command, cwd):
+        raise FileNotFoundError(2, "No such file or directory", "monitor")
+
+    monkeypatch.setattr(demo_state, "run_command", boom)
+
+    assert run_drill("--expect", "DIRTY") == "UNMET"
+    assert cli.snapshot("http://test")["cases"] == []
+    said = capsys.readouterr().err
+    assert "FileNotFoundError" in said, "the drill did not say why the command never ran"
+    assert "restored" in said, "the drill did not say it had put the board back"
+
+
+def test_a_ctrl_c_mid_command_still_puts_the_board_back(run_drill, cli, ids, monkeypatch):
+    """KeyboardInterrupt is not an Exception, so it is the `finally` and not the
+    `except` that has to be doing the restoring — and SIGTERM is turned into this
+    one for the same reason."""
+    def interrupted(command, cwd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(demo_state, "run_command", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_drill("--expect", "DIRTY")
+    assert cli.snapshot("http://test")["cases"] == []
+
+
+def test_a_monitor_that_did_not_notice_the_dirt_fails_the_drill(run_drill, watcher, cli, ids, capsys):
+    """Without this the drill only ever tested the restore: any command at all would
+    have passed, including one that answered READY about a board with a case in
+    `submitted` on it."""
+    watcher["code"], watcher["says"] = 0, "board state: every case at ready\n"
+
+    assert run_drill("--expect", "DIRTY") == "UNMET"
+    assert "never said 'DIRTY'" in capsys.readouterr().err
+    assert cli.snapshot("http://test")["cases"] == []      # a failed drill still tidies up
+
+
+def test_the_commands_own_exit_code_is_reported_and_not_inherited(run_drill, watcher, cli, ids, capsys):
+    """demoready_sweep returns 1 for a demo that is not READY — which is the correct
+    answer to a board this drill just dirtied. Adopting it would mark every working
+    drill as broken."""
+    watcher["code"] = 1
+
+    assert run_drill("--expect", "DIRTY") == "OK"
+    assert "exited 1" in capsys.readouterr().err
+
+
+def test_a_drill_with_nothing_to_expect_says_nobody_read_the_output(run_drill, watcher, cli, ids, capsys):
+    """It still proves the restore, so it is not a failure — but it must not print
+    the same line as a run that checked what the monitor said."""
+    assert run_drill() == "OK"
+    assert "nothing checked what it said" in capsys.readouterr().err
+
+
+def test_an_already_dirty_board_is_refused_untouched(run_drill, watcher, cli, client, ids, capsys):
+    """A monitor answering DIRTY next to somebody else's residue would answer DIRTY
+    with this drill deleted, so the run would pass without testing anything."""
+    move(client, ids[0], "submitted", "someone else's smoke test")
+
+    assert run_drill("--expect", "DIRTY") == "REFUSED"
+    assert watcher["ran"] == 0
+    said = capsys.readouterr().err
+    assert "already dirty" in said, "the refusal did not say what was wrong with the board"
+    assert "demo_state.py reset" in said, "the refusal did not say how to clear it"
+    kept = client.get(f"/api/cases/{ids[0]}/status").json()
+    assert kept["appeal_status"] == "submitted" and kept["status_note"] == "someone else's smoke test"
+
+
+def test_a_board_with_no_case_at_ready_is_refused(run_drill, watcher, cli, monkeypatch, capsys):
+    monkeypatch.setattr(demo_state, "snapshot", lambda base: {"cases": [], "cases_total": 0,
+                                                              "orphans": 0, "taken_at": "x"})
+    monkeypatch.setattr(demo_state, "api", lambda *a, **k: [])
+
+    assert run_drill("--expect", "DIRTY") == "REFUSED"
+    assert watcher["ran"] == 0
+    assert "no case sitting at ready" in capsys.readouterr().err
+
+
+def test_a_token_the_deployment_refuses_is_found_before_anything_moves(run_drill, watcher, cli, ids):
+    """`resolve_token` returning a string is not the deployment accepting it. The
+    hand version learns that from a 403 on the *undo*, with a case already moved and
+    no way back; the drill sends a no-op through the same door first."""
+    with pytest.raises(SystemExit):
+        run_drill("--token", "wrong-token")
+
+    assert watcher["ran"] == 0
+    assert cli.snapshot("http://test")["cases"] == []
+
+
+@pytest.fixture()
+def restore_fails(monkeypatch):
+    """The undo refused — a 502, a rotated token, the service restarting mid-drill."""
+    def refuse(base, snap, token):
+        raise SystemExit("/api/workflow/reset -> HTTP 502")
+
+    monkeypatch.setattr(demo_state, "restore", refuse)
+
+
+def test_a_restore_that_fails_names_the_residue_and_hands_over_the_repair(run_drill, 
+        watcher, cli, ids, restore_fails, tmp_path, capsys):
+    """The one outcome worse than a red drill: a client board left moved. It cannot
+    end in a traceback — it has to end in the command that fixes it, and in a file
+    holding the board as it was found, because the process that knows is exiting."""
+    code = run_drill("--expect", "DIRTY", "--cwd", str(tmp_path))
+    said = capsys.readouterr().err
+
+    assert code == "RESIDUE"
+    assert "RESIDUE LEFT ON" in said, "a board left moved was not announced as residue"
+    assert "HTTP 502" in said, "the residue report did not say why the restore failed"
+    written = list(tmp_path.glob("demo_state-residue-*.json"))
+    assert len(written) == 1, f"expected one saved snapshot, found {len(written)}"
+    assert f"-i {written[0]}" in said, "the residue report did not hand over a runnable repair"
+    assert json.loads(written[0].read_text())["cases"] == []
+
+
+def test_a_restore_that_says_it_worked_is_still_checked(run_drill, watcher, cli, ids, monkeypatch,
+                                                        tmp_path, capsys):
+    """The quiet version of the same disaster: the reset door answers 200 and the
+    case is still sitting in `submitted`. Nothing else in this run would notice —
+    which is why the drill re-reads the board instead of trusting the reply."""
+    monkeypatch.setattr(demo_state, "restore", lambda base, snap, token: {"restored": 0})
+
+    assert run_drill("--expect", "DIRTY", "--cwd", str(tmp_path)) == "RESIDUE"
+    said = capsys.readouterr().err
+    assert "came back different" in said, "a silent half-restore was reported as a success"
+    assert "1 submitted" in said, "the residue report did not say what was left on the board"
+
+
+def test_residue_outranks_every_other_verdict(run_drill, watcher, cli, ids, restore_fails, tmp_path, capsys):
+    """A drill whose monitor also missed the dirt still reports the board first:
+    a monitor to fix is tomorrow's work, a moved case on a client's demo is now."""
+    watcher["says"] = "board state: every case at ready\n"
+
+    assert run_drill("--expect", "DIRTY", "--cwd", str(tmp_path)) == "RESIDUE"
+    assert "RESIDUE LEFT ON" in capsys.readouterr().err
+
+
+def test_a_sigterm_becomes_something_the_finally_can_survive():
+    """SIGINT already arrives as KeyboardInterrupt. SIGTERM kills the interpreter
+    outright — which on this tool means walking away from a dirtied client board —
+    so the drill converts it into the same exception the restore already survives."""
+    was = signal.getsignal(signal.SIGTERM)
+    try:
+        demo_state.die_on_sigterm()
+        with pytest.raises(KeyboardInterrupt, match="SIGTERM"):
+            os.kill(os.getpid(), signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, was)
+
+
+def test_the_drill_needs_a_command_to_run(cli, capsys):
+    assert demo_state.main(["drill", "--base", "http://test"]) == 1, \
+        "a drill with no command to run started anyway"
+    assert "--run" in capsys.readouterr().err
+
+
+def test_a_wiped_box_cannot_drill_at_all(cli, env_file, monkeypatch, capsys):
+    """The drill is in the same write group as reset: no token, no undo, so it must
+    refuse before it moves anything rather than discover this halfway through."""
+    monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
+
+    assert demo_state.main(["drill", "--base", "http://test", "--run", "monitor"]) == 1, \
+        "a box with no token began a drill it could not undo"
+    assert "standing state" in capsys.readouterr().err
+
+
 # ------------------------------------------------- where the token comes from
 # The token is standing state that lives on the Railway service and is cached in
 # a gitignored `.env.demo`. A re-provision wipes the cache, and the failure was a
@@ -283,7 +528,8 @@ def test_the_token_is_read_from_the_boxs_file_when_nothing_else_supplies_it(env_
     monkeypatch.delenv("DEMO_ADMIN_TOKEN", raising=False)
     env_file.write_text(f"DEMO_ADMIN_TOKEN={TOKEN}\n")
 
-    assert demo_state.resolve_token() == TOKEN
+    assert demo_state.resolve_token() == TOKEN, \
+        "the cached token on the box was not found, so every command needs --token by hand"
 
 
 def test_the_explicit_flag_and_the_environment_outrank_the_cached_file(env_file, monkeypatch):

@@ -31,7 +31,7 @@ generate_letters.py  DB → LLM draft → MUSC PDF → appeals table
 retime_drafts.py     re-point cached drafts at the rebuilt timeline (no LLM calls)
 letterhead.py        MUSC letterhead renderer (ReportLab)
 app.py               FastAPI API + dashboard
-demo_state.py        snapshot / restore / reset the live board's appeal status
+demo_state.py        snapshot / restore / reset the live board's appeal status; `drill` a monitor against it
 refresh_demo.py      scheduled re-anchor of the timeline: rebuild → test → push → verify
 static/index.html    dashboard UI (no build step, no CDN)
 letters/             one PDF per denial — untracked build artifact, see below
@@ -41,7 +41,7 @@ tests/test_status.py   appeal lifecycle: transitions, persistence, filters, KPIs
 tests/test_plausibility.py  ages, deceased patients, claim timeline, draft cache
 tests/test_batch.py    bulk status changes (incl. partial failure) + payer batches
 tests/test_retime.py   date re-pointing when a rebuild moves the timeline
-tests/test_demo_state.py  the admin reset door and snapshot/restore round-trip
+tests/test_demo_state.py  the admin reset door, snapshot/restore round-trip, and the drill
 tests/test_refresh.py     when the scheduled refresh ships and when it stays quiet
 tests/shots.py         responsive screenshots at phone / tablet / desktop widths
 ```
@@ -184,6 +184,26 @@ python demo_state.py restore  --base https://… -i data/demo_state.json   # rep
 python demo_state.py reset    --base https://…                      # everything back to ready
 python demo_state.py prune    --base https://…                      # drop rows for deleted cases
 ```
+
+**Proving a monitor can see dirt (`drill`).** A check that claims to notice a board somebody
+left moved is only worth having if it has been shown to fail on one, and showing that by hand is
+five steps on a *client-facing* demo — snapshot, move a case, run the check, restore, re-verify —
+where forgetting the fifth leaves a case sitting in `submitted` in front of MUSC. `drill` is
+those five as one command whose restore is a `finally`:
+
+```bash
+python demo_state.py drill --base https://… \
+    --run 'python ../../tools/demoready_sweep.py musc-appeals --quick --dry-run' --expect DIRTY
+```
+
+It refuses a board that is already dirty (a board-wide verdict next to somebody else's residue
+would come out DIRTY with the drill removed), sends a scoped `reset` first so a rotated token is
+found *before* anything moves, and reports the command's exit code rather than adopting it —
+`demoready_sweep` returns 1 for a non-READY demo, so the monitor failing is the drill passing.
+What the command *said* is judged by `--expect`; without it the run says out loud that nothing
+read the output. Exit codes: `0` pass, `2` refused, `3` the command did not do what `--expect`
+asked, `4` **residue** — the board did not come back, in which case it writes the snapshot to a
+file and prints the `restore -i` that repairs it. `4` is the only outcome that needs a human now.
 
 `snapshot`/`show` are read-only; `restore`/`reset`/`prune` go through `POST /api/workflow/…`, which
 **does not exist** unless the deployment sets `DEMO_ADMIN_TOKEN` (an unset token means 404, a wrong
