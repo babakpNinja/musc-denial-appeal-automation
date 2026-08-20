@@ -60,8 +60,12 @@ python ingest.py              # re-pull FHIR bundles (network)
 python build_db.py            # rebuild SQLite from data/raw/
 python generate_letters.py    # draft + render any missing letters
 python generate_letters.py --rerender   # rebuild PDFs from stored drafts, no LLM calls
-python -m pytest tests -q
+python -m pytest tests -q -rsfE
 ```
+
+That last line is the argv `tools/ship.py` runs before it pushes, and a test fails
+if this file stops matching it. `-rsfE` buys the `s`: without it a skip is a count
+that quietly shrank, with no name and no reason (#114, #239, #499).
 
 `generate_letters.py` caches: it skips cases whose PDF already exists, and every draft is
 persisted to `appeals.sections_json` so a redeploy or a letterhead tweak never re-bills the model.
